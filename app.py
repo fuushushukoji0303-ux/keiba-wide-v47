@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-地方競馬ワイド投票管理 v47.3 - スマホ完全版
+地方競馬ワイド投票管理 v47.4 - スマホ完全版
 
 主な追加:
 - NAR公式サイトから当日のワイドオッズ・単勝/複勝データを取得
@@ -31,7 +31,7 @@ from pathlib import Path
 from flask import Flask, request, redirect, url_for
 
 JST = timezone(timedelta(hours=9))
-APP_TITLE = "地方競馬 ワイド投票管理 v47.3"
+APP_TITLE = "地方競馬 ワイド投票管理 v47.4"
 DAILY_LIMIT = 3000
 DEFAULT_BET = 300
 SPAT4_URL = "https://www.spat4.jp/keiba/pc"
@@ -851,7 +851,7 @@ def page(body, title=APP_TITLE):
     return f"""<!doctype html><html lang="ja"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-title" content="地方競馬v47.3">
+<meta name="apple-mobile-web-app-title" content="地方競馬v47.4">
 <title>{html.escape(title)}</title><style>{CSS}</style></head><body><div class="wrap">
 <div class="head"><h1>{APP_TITLE}</h1><span class="badge">スマホ完全版</span></div>
 <div class="nav">
@@ -963,7 +963,9 @@ def analyze():
     <button class="green">ワイドオッズ取得 → 3点予想</button>
     </form></div>"""
 
-    if request.method == "GET":
+    auto_run = request.args.get("auto", "") == "1"
+
+    if request.method == "GET" and not auto_run:
         return page(form, "オッズ・3点予想")
 
     if course not in NAR_COURSE_CODES or not (1 <= race <= 12):
@@ -1198,12 +1200,13 @@ def courses():
     trs = "".join(
         f"<tr><td><strong>{html.escape(c)}</strong></td>"
         f"<td>{', '.join(str(x) + 'R' for x in r)}</td>"
-        f"<td><a class='btn secondary' href='{html.escape(url_for('analyze', course=c, race=r[-1], mode='バランス'), quote=True)}'>分析へ</a></td></tr>"
+        f"<td><a class='btn green' href='{html.escape(url_for('analyze', course=c, race=r[-1], mode='バランス', auto=1), quote=True)}'>自動3点予想</a></td></tr>"
         for c, r in items
     )
 
     return page(
         f'<div class="card"><div class="title">本日の開催</div>'
+        f'<div class="note">「自動3点予想」を押すと、その競馬場の最終レースをバランスモードでそのまま分析します。</div>'
         f'<table><tr><th>競馬場</th><th>レース</th><th></th></tr>{trs}</table></div>',
         "本日の開催"
     )
