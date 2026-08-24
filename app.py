@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-地方競馬ワイド投票管理 v47.6 - スマホ完全版
+地方競馬ワイド投票管理 v47.7 - 単独的中プラス配分版
 
 主な追加:
 - NAR公式サイトから当日のワイドオッズ・単勝/複勝データを取得
@@ -31,7 +31,7 @@ from pathlib import Path
 from flask import Flask, request, redirect, url_for
 
 JST = timezone(timedelta(hours=9))
-APP_TITLE = "地方競馬 ワイド投票管理 v47.6"
+APP_TITLE = "地方競馬 ワイド投票管理 v47.7"
 DAILY_LIMIT = 3000
 DEFAULT_BET = 300
 SPAT4_URL = "https://www.spat4.jp/keiba/pc"
@@ -670,21 +670,9 @@ def evaluate_race_rank(horses, wide_data, mode, remaining_budget):
     }
 
 
-def allocate_amounts(grade, recommendations, remaining_budget):
-    if not recommendations or remaining_budget < 100:
+def weighted_amounts(recommendations, usable):
+    if not recommendations or usable < 100:
         return [0] * len(recommendations)
-
-    ratio = {"S+": 0.30, "S": 0.20, "S-": 0.10, "A": 0.10}.get(grade, 0.0)
-    if ratio <= 0:
-        # B以下は自動購入額を出さず、手動判断にする
-        return [0] * len(recommendations)
-
-    usable = int((remaining_budget * ratio) // 100 * 100)
-    if len(recommendations) >= 3 and usable < 300:
-        if remaining_budget >= 300:
-            usable = 300
-        else:
-            return [0] * len(recommendations)
 
     weights = [max(1.0, float(x.get("priority_score", 1.0))) for x in recommendations]
     total_weight = sum(weights)
@@ -710,6 +698,84 @@ def allocate_amounts(grade, recommendations, remaining_budget):
             break
 
     return amounts
+
+
+def positive_profit_amounts(recommendations, usable, min_profit=100):
+    if len(recommendations) < 3 or usable < 300:
+        return None
+
+    odds = []
+    for item in recommendations[:3]:
+        odd = float(item.get("low") or 0)
+        if odd <= 1.0:
+            return None
+        odds.append(odd)
+
+    # 逆数和が1以上なら、3点すべてを「単独的中でもプラス」にすることは不可能
+    if sum(1.0 / x for x in odds) >= 1.0:
+        return None
+
+    priorities = sorted(
+        range(3),
+        key=lambda i: float(recommendations[i].get("priority_score", 0.0)),
+        reverse=True,
+    )
+
+    for target_total in range(int(usable // 100) * 100, 299, -100):
+        amounts = []
+        for odd in odds:
+            need = int(((target_total + min_profit) / odd + 99) // 100 * 100)
+            amounts.append(max(100, need))
+
+        if sum(amounts) > target_total:
+            continue
+
+        remain = target_total - sum(amounts)
+        idx = 0
+        while remain >= 100:
+            amounts[priorities[idx % len(priorities)]] += 100
+            remain -= 100
+            idx += 1
+
+        final_total = sum(amounts)
+        if all(amounts[i] * odds[i] >= final_total + min_profit for i in range(3)):
+            return amounts
+
+    return None
+
+
+def allocate_amounts(grade, recommendations, remaining_budget):
+    result = {
+        "amounts": [0] * len(recommendations),
+        "all_positive": False,
+        "note": "",
+    }
+
+    if not recommendations or remaining_budget < 100:
+        return result
+
+    ratio = {"S+": 0.30, "S": 0.20, "S-": 0.10, "A": 0.10}.get(grade, 0.0)
+    if ratio <= 0:
+        result["note"] = "B以下は自動購入額を表示しません。"
+        return result
+
+    usable = int((remaining_budget * ratio) // 100 * 100)
+    if len(recommendations) >= 3 and usable < 300:
+        if remaining_budget >= 300:
+            usable = 300
+        else:
+            return result
+
+    positive = positive_profit_amounts(recommendations, usable, min_profit=100)
+    if positive:
+        result["amounts"] = positive
+        result["all_positive"] = True
+        result["note"] = "保守的に下限オッズを使い、3点のどれが1点だけ的中しても最低 +100円以上になるよう自動配分しています。"
+        return result
+
+    result["amounts"] = weighted_amounts(recommendations, usable)
+    result["note"] = "この3点は保守的な下限オッズでは『どれか1点だけ的中でもプラス』配分を作れないため、通常の参考配分を表示しています。"
+    return result
 
 
 def save_pick(course, race, mode, result):
@@ -908,7 +974,7 @@ table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:8px 5px;b
 }
 
 
-/* ===== v47.6 ホーム購入確認・想定損益 ===== */
+/* ===== v47.7 単独的中プラス配分 ===== */
 .summary-strip{
   display:grid;
   grid-template-columns:repeat(3,1fr);
@@ -965,7 +1031,7 @@ def page(body, title=APP_TITLE):
     return f"""<!doctype html><html lang="ja"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-title" content="地方競馬v47.6">
+<meta name="apple-mobile-web-app-title" content="地方競馬v47.7">
 <title>{html.escape(title)}</title><style>{CSS}</style></head><body><div class="wrap">
 <div class="head"><h1>{APP_TITLE}</h1><span class="badge">スマホ完全版</span></div>
 <div class="nav">
@@ -1132,7 +1198,8 @@ def analyze():
     result = evaluate_race_rank(horse_data, wide_data, mode, summary()["remaining"])
     save_pick(course, race, mode, result)
     recs = result["recommendations"][:3]
-    amounts = allocate_amounts(result["grade"], recs, summary()["remaining"])
+    allocation = allocate_amounts(result["grade"], recs, summary()["remaining"])
+    amounts = allocation["amounts"]
 
     rec_rows = ""
     rec_cards = ""
@@ -1189,6 +1256,8 @@ def analyze():
       {rec_rows or '<tr><td colspan="7">候補を3点作れませんでした。</td></tr>'}
       </table></div>
       <div class="mobile-picks">{rec_cards or '<div class="note">候補を3点作れませんでした。</div>'}</div>
+      {(('<div class="ok">' + html.escape(allocation["note"]) + '</div>') if allocation.get("all_positive") and allocation.get("note") else '')}
+      {(('<div class="note">' + html.escape(allocation["note"]) + '</div>') if (not allocation.get("all_positive")) and allocation.get("note") and recs else '')}
       {"<form method='post' action='/apply_recommendations'>" + hidden +
        f"<input type='hidden' name='course' value='{html.escape(course)}'>"
        f"<input type='hidden' name='race' value='{race}R'>"
