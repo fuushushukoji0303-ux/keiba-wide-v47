@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-地方競馬ワイド投票管理 v47.2 - スマホ完全版
+地方競馬ワイド投票管理 v47.3 - スマホ完全版
 
 主な追加:
 - NAR公式サイトから当日のワイドオッズ・単勝/複勝データを取得
@@ -31,7 +31,7 @@ from pathlib import Path
 from flask import Flask, request, redirect, url_for
 
 JST = timezone(timedelta(hours=9))
-APP_TITLE = "地方競馬 ワイド投票管理 v47.2"
+APP_TITLE = "地方競馬 ワイド投票管理 v47.3"
 DAILY_LIMIT = 3000
 DEFAULT_BET = 300
 SPAT4_URL = "https://www.spat4.jp/keiba/pc"
@@ -757,27 +757,92 @@ table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:8px 5px;b
 .rank1{font-weight:800;background:#f7fbff}.small{font-size:12px;color:var(--muted)}
 @media(max-width:700px){.grid{grid-template-columns:1fr 1fr}.row,.two{grid-template-columns:1fr}.wrap{padding:9px}.metric strong{font-size:18px}}
 
-/* ===== v47.2 スマホ表示改善 ===== */
-@media (max-width:760px){
+/* ===== v47.3 スマホ上部メニュー改善 ===== */
+@media(max-width:760px){
   body{overflow-x:hidden}
-  .wrap{width:100%;max-width:100%;padding-left:12px;padding-right:12px;box-sizing:border-box}
-  .top{align-items:flex-start}
-  h1{font-size:30px;line-height:1.12;overflow-wrap:anywhere}
-  nav{display:grid!important;grid-template-columns:repeat(2,minmax(0,1fr))!important;gap:10px!important;width:100%!important}
-  nav a{min-width:0!important;width:100%!important;min-height:58px;padding:12px 10px!important;
-        display:flex!important;align-items:center;justify-content:center;text-align:center;
-        white-space:normal!important;word-break:keep-all!important;overflow-wrap:normal!important;
-        line-height:1.25!important;font-size:18px!important;box-sizing:border-box}
-  nav a:last-child:nth-child(odd){grid-column:1/-1}
-  .badge{white-space:normal!important;text-align:center}
-  table{font-size:15px}
-  th,td{padding:10px 8px!important;vertical-align:top}
-  .card{padding:16px!important}
+  .wrap{
+    width:100%;
+    max-width:100%;
+    padding:12px;
+    box-sizing:border-box
+  }
+
+  .head{
+    display:grid;
+    grid-template-columns:minmax(0,1fr) auto;
+    gap:10px;
+    align-items:start;
+    margin-bottom:14px
+  }
+
+  .head h1{
+    font-size:clamp(27px,8vw,34px);
+    line-height:1.14;
+    margin:0;
+    word-break:keep-all;
+    overflow-wrap:normal
+  }
+
+  .head .badge{
+    max-width:105px;
+    padding:9px 10px;
+    font-size:14px;
+    line-height:1.25;
+    text-align:center;
+    white-space:normal
+  }
+
+  .nav{
+    display:grid !important;
+    grid-template-columns:repeat(2,minmax(0,1fr)) !important;
+    gap:10px !important;
+    width:100% !important;
+    overflow:visible !important;
+    margin-bottom:14px !important;
+    padding-bottom:0 !important
+  }
+
+  .nav .btn{
+    min-width:0 !important;
+    width:100% !important;
+    min-height:64px;
+    padding:12px 10px !important;
+    display:flex !important;
+    align-items:center;
+    justify-content:center;
+    text-align:center;
+    white-space:normal !important;
+    word-break:keep-all !important;
+    overflow-wrap:normal !important;
+    line-height:1.25 !important;
+    font-size:17px !important;
+    box-sizing:border-box
+  }
+
+  .nav .btn:last-child{
+    grid-column:1 / -1
+  }
+
+  .grid{grid-template-columns:1fr 1fr}
+  .row,.two{grid-template-columns:1fr}
+  .metric strong{font-size:18px}
+  table{font-size:14px}
+  th,td{padding:9px 6px}
+  .card{padding:14px}
 }
-@media (max-width:430px){
-  nav a{font-size:17px!important;min-height:56px}
-  h1{font-size:29px}
+
+@media(max-width:430px){
+  .wrap{padding:10px}
+  .head h1{font-size:29px}
+  .head .badge{max-width:96px;font-size:13px}
+  .nav{gap:8px !important}
+  .nav .btn{
+    min-height:60px;
+    font-size:16px !important;
+    padding:10px 8px !important
+  }
 }
+
 
 """
 
@@ -786,7 +851,7 @@ def page(body, title=APP_TITLE):
     return f"""<!doctype html><html lang="ja"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-title" content="地方競馬v47.2">
+<meta name="apple-mobile-web-app-title" content="地方競馬v47.3">
 <title>{html.escape(title)}</title><style>{CSS}</style></head><body><div class="wrap">
 <div class="head"><h1>{APP_TITLE}</h1><span class="badge">スマホ完全版</span></div>
 <div class="nav">
