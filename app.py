@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-地方競馬ワイド投票管理 v47.9 - 成績自動集計版
+地方競馬ワイド投票管理 v48.0 - 成績分析版
 
 主な追加:
 - NAR公式サイトから当日のワイドオッズ・単勝/複勝データを取得
@@ -31,7 +31,7 @@ from pathlib import Path
 from flask import Flask, request, redirect, url_for
 
 JST = timezone(timedelta(hours=9))
-APP_TITLE = "地方競馬 ワイド投票管理 v47.9"
+APP_TITLE = "地方競馬 ワイド投票管理 v48.0"
 DAILY_LIMIT = 3000
 DEFAULT_BET = 300
 SPAT4_URL = "https://www.spat4.jp/keiba/pc"
@@ -104,6 +104,16 @@ def init_db():
         );
         """)
 
+        # v48.0 migration: 既存DBに予想モード列を追加
+        draft_cols = {r["name"] for r in con.execute("PRAGMA table_info(drafts)").fetchall()}
+        if "mode" not in draft_cols:
+            con.execute("ALTER TABLE drafts ADD COLUMN mode TEXT NOT NULL DEFAULT '不明'")
+
+        purchase_cols = {r["name"] for r in con.execute("PRAGMA table_info(purchases)").fetchall()}
+        if "mode" not in purchase_cols:
+            con.execute("ALTER TABLE purchases ADD COLUMN mode TEXT NOT NULL DEFAULT '不明'")
+
+
 
 init_db()
 
@@ -136,16 +146,16 @@ def write_draft(vals):
     with db() as con:
         con.execute("""
         INSERT INTO drafts
-        (id,saved_at,course,race,wide1,odds1,amount1,wide2,odds2,amount2,wide3,odds3,amount3)
-        VALUES(1,?,?,?,?,?,?,?,?,?,?,?,?)
+        (id,saved_at,course,race,mode,wide1,odds1,amount1,wide2,odds2,amount2,wide3,odds3,amount3)
+        VALUES(1,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(id) DO UPDATE SET
-        saved_at=excluded.saved_at,course=excluded.course,race=excluded.race,
+        saved_at=excluded.saved_at,course=excluded.course,race=excluded.race,mode=excluded.mode,
         wide1=excluded.wide1,odds1=excluded.odds1,amount1=excluded.amount1,
         wide2=excluded.wide2,odds2=excluded.odds2,amount2=excluded.amount2,
         wide3=excluded.wide3,odds3=excluded.odds3,amount3=excluded.amount3
         """, (
             now().strftime("%Y-%m-%d %H:%M:%S"),
-            vals.get("course", ""), vals.get("race", ""),
+            vals.get("course", ""), vals.get("race", ""), vals.get("mode", "不明"),
             vals.get("wide1", ""), vals.get("odds1", 0), vals.get("amount1", 0),
             vals.get("wide2", ""), vals.get("odds2", 0), vals.get("amount2", 0),
             vals.get("wide3", ""), vals.get("odds3", 0), vals.get("amount3", 0),
@@ -157,6 +167,7 @@ def save_draft(form):
     vals = {
         "course": form.get("course", "").strip(),
         "race": form.get("race", "").strip(),
+        "mode": form.get("mode", "不明").strip() or "不明",
     }
     for i in range(1, 4):
         vals[f"wide{i}"] = clean_combo(form.get(f"wide{i}", ""))
@@ -1152,6 +1163,70 @@ table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:8px 5px;b
   .mobile-history{display:block}
 }
 
+
+/* ===== v48.0 月別・競馬場別・予想モード別分析 ===== */
+.mobile-analysis{display:none}
+.analysis-card{
+  background:#f7f9fc;
+  border:1px solid #d8e2ec;
+  border-radius:18px;
+  padding:14px;
+  margin-bottom:12px
+}
+.analysis-key{
+  font-size:22px;
+  font-weight:900;
+  margin-bottom:10px
+}
+.analysis-grid{
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  gap:8px
+}
+.analysis-grid>div{
+  background:#fff;
+  border-radius:12px;
+  padding:10px
+}
+.analysis-grid span,
+.highlight-grid span{
+  display:block;
+  color:#68778c;
+  font-size:12px;
+  margin-bottom:3px
+}
+.analysis-grid strong{
+  display:block;
+  font-size:18px
+}
+.highlight-grid{
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  gap:10px
+}
+.highlight-grid>div{
+  background:#f5f8fb;
+  border:1px solid #dce4ee;
+  border-radius:14px;
+  padding:12px
+}
+.highlight-grid strong{
+  display:block;
+  font-size:22px;
+  margin:3px 0
+}
+.highlight-grid small{
+  display:block;
+  color:#68778c;
+  line-height:1.5
+}
+@media(max-width:760px){
+  .nav .btn:last-child{grid-column:auto!important}
+  .mobile-analysis{display:block}
+  .desktop-analysis{display:none!important}
+  .highlight-grid{grid-template-columns:1fr}
+}
+
 """
 
 
@@ -1159,7 +1234,7 @@ def page(body, title=APP_TITLE):
     return f"""<!doctype html><html lang="ja"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-title" content="地方競馬v47.9">
+<meta name="apple-mobile-web-app-title" content="地方競馬v48.0">
 <title>{html.escape(title)}</title><style>{CSS}</style></head><body><div class="wrap">
 <div class="head"><h1>{APP_TITLE}</h1><span class="badge">スマホ完全版</span></div>
 <div class="nav">
@@ -1167,6 +1242,7 @@ def page(body, title=APP_TITLE):
 <a class="btn secondary" href="/analyze">オッズ・3点予想</a>
 <a class="btn secondary" href="/picks">勝負レース</a>
 <a class="btn secondary" href="/history">成績履歴</a>
+<a class="btn secondary" href="/analytics">成績分析</a>
 <a class="btn secondary" href="/courses">本日の開催</a>
 </div>
 {body}
@@ -1389,6 +1465,7 @@ def analyze():
       {"<form method='post' action='/apply_recommendations'>" + hidden +
        f"<input type='hidden' name='course' value='{html.escape(course)}'>"
        f"<input type='hidden' name='race' value='{race}R'>"
+       f"<input type='hidden' name='mode' value='{html.escape(mode)}'>"
        "<button class='green'>この3点をホームへ入力</button></form>" if recs else ""}
     </div>
 
@@ -1406,6 +1483,7 @@ def apply_recommendations():
     vals = {
         "course": request.form.get("course", ""),
         "race": request.form.get("race", ""),
+        "mode": request.form.get("mode", "不明") or "不明",
     }
     for i in range(1, 4):
         vals[f"wide{i}"] = clean_combo(request.form.get(f"wide{i}", ""))
@@ -1432,12 +1510,12 @@ def record():
 
     with db() as con:
         con.execute("""
-        INSERT INTO purchases(created_at,race_date,course,race,bets,total_bet,result,return_amount)
-        VALUES(?,?,?,?,?,?,?,?)
+        INSERT INTO purchases(created_at,race_date,course,race,bets,total_bet,result,return_amount,mode)
+        VALUES(?,?,?,?,?,?,?,?,?)
         """, (
             now().strftime("%Y-%m-%d %H:%M:%S"), today(),
             d.get("course") or "", d.get("race") or "",
-            bet_text, total, "未確定", 0,
+            bet_text, total, "未確定", 0, d.get("mode") or "不明",
         ))
 
     return redirect(url_for("history", msg="購入記録を追加しました。レース終了後、この画面で「的中」または「ハズレ」を押すだけで成績が自動集計されます。"))
@@ -1595,6 +1673,116 @@ def history():
         {trs}</table></div></div>""",
         "成績履歴"
     )
+
+
+@app.get("/analytics")
+def analytics():
+    with db() as con:
+        rows = con.execute(
+            "SELECT * FROM purchases WHERE result IN ('的中','ハズレ') ORDER BY race_date DESC,id DESC"
+        ).fetchall()
+
+    def aggregate(key_fn):
+        groups = {}
+        for r in rows:
+            key = key_fn(r)
+            if not key:
+                key = "不明"
+            g = groups.setdefault(key, {
+                "races": 0, "hits": 0, "bet": 0, "ret": 0
+            })
+            g["races"] += 1
+            if r["result"] == "的中":
+                g["hits"] += 1
+            g["bet"] += int(r["total_bet"])
+            g["ret"] += int(r["return_amount"])
+
+        result = []
+        for key, g in groups.items():
+            g["key"] = key
+            g["profit"] = g["ret"] - g["bet"]
+            g["hit_rate"] = (g["hits"] / g["races"] * 100) if g["races"] else 0.0
+            g["recovery"] = (g["ret"] / g["bet"] * 100) if g["bet"] else 0.0
+            result.append(g)
+        return result
+
+    # YYYY-MM 単位
+    monthly = aggregate(lambda r: (r["race_date"] or "")[:7])
+    monthly.sort(key=lambda x: x["key"], reverse=True)
+
+    by_course = aggregate(lambda r: r["course"] or "不明")
+    by_course.sort(key=lambda x: (x["recovery"], x["profit"]), reverse=True)
+
+    by_mode = aggregate(lambda r: r["mode"] or "不明")
+    by_mode.sort(key=lambda x: (x["recovery"], x["profit"]), reverse=True)
+
+    def table_block(title, items, key_label):
+        if not items:
+            return f'<div class="card"><div class="title">{html.escape(title)}</div><div class="note">確定済みの成績データがまだありません。</div></div>'
+
+        desktop_rows = ""
+        mobile_cards = ""
+        for g in items:
+            desktop_rows += (
+                f"<tr><td><strong>{html.escape(str(g['key']))}</strong></td>"
+                f"<td>{g['races']}件</td><td>{g['hit_rate']:.1f}%</td>"
+                f"<td>{g['recovery']:.1f}%</td><td>{g['bet']:,}円</td>"
+                f"<td>{g['ret']:,}円</td><td>{g['profit']:+,}円</td></tr>"
+            )
+            mobile_cards += f"""
+            <div class="analysis-card">
+              <div class="analysis-key">{html.escape(str(g["key"]))}</div>
+              <div class="analysis-grid">
+                <div><span>確定レース</span><strong>{g["races"]}件</strong></div>
+                <div><span>的中率</span><strong>{g["hit_rate"]:.1f}%</strong></div>
+                <div><span>回収率</span><strong>{g["recovery"]:.1f}%</strong></div>
+                <div><span>収支</span><strong>{g["profit"]:+,}円</strong></div>
+                <div><span>購入額</span><strong>{g["bet"]:,}円</strong></div>
+                <div><span>払戻額</span><strong>{g["ret"]:,}円</strong></div>
+              </div>
+            </div>
+            """
+
+        return f"""
+        <div class="card">
+          <div class="title">{html.escape(title)}</div>
+          <div class="mobile-analysis">{mobile_cards}</div>
+          <div class="desktop-analysis scroll">
+            <table>
+              <tr><th>{html.escape(key_label)}</th><th>確定</th><th>的中率</th><th>回収率</th><th>購入額</th><th>払戻額</th><th>収支</th></tr>
+              {desktop_rows}
+            </table>
+          </div>
+        </div>
+        """
+
+    # ベスト指標（データがある場合のみ）
+    best_course = by_course[0] if by_course else None
+    best_mode = by_mode[0] if by_mode else None
+
+    highlights = ""
+    if best_course or best_mode:
+        highlights = '<div class="card"><div class="title">成績ハイライト</div><div class="highlight-grid">'
+        if best_course:
+            highlights += (
+                f'<div><span>回収率トップ競馬場</span><strong>{html.escape(str(best_course["key"]))}</strong>'
+                f'<small>回収率 {best_course["recovery"]:.1f}% / 収支 {best_course["profit"]:+,}円</small></div>'
+            )
+        if best_mode:
+            highlights += (
+                f'<div><span>回収率トップ予想モード</span><strong>{html.escape(str(best_mode["key"]))}</strong>'
+                f'<small>回収率 {best_mode["recovery"]:.1f}% / 収支 {best_mode["profit"]:+,}円</small></div>'
+            )
+        highlights += "</div></div>"
+
+    body = (
+        highlights
+        + table_block("月別成績", monthly, "月")
+        + table_block("競馬場別成績", by_course, "競馬場")
+        + table_block("予想モード別成績", by_mode, "予想モード")
+        + '<div class="note">回収率や的中率は確定済みの購入記録だけを集計します。データ件数が少ない段階では参考値としてご覧ください。</div>'
+    )
+    return page(body, "成績分析")
 
 
 @app.post("/result/<int:pid>")
