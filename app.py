@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-地方競馬ワイド投票管理 v47.1 - スマホ完全版
+地方競馬ワイド投票管理 v47.2 - スマホ完全版
 
 主な追加:
 - NAR公式サイトから当日のワイドオッズ・単勝/複勝データを取得
@@ -31,7 +31,7 @@ from pathlib import Path
 from flask import Flask, request, redirect, url_for
 
 JST = timezone(timedelta(hours=9))
-APP_TITLE = "地方競馬 ワイド投票管理 v47.1"
+APP_TITLE = "地方競馬 ワイド投票管理 v47.2"
 DAILY_LIMIT = 3000
 DEFAULT_BET = 300
 SPAT4_URL = "https://www.spat4.jp/keiba/pc"
@@ -756,6 +756,29 @@ button,.btn{border:0;border-radius:10px;background:var(--blue);color:white;paddi
 table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:8px 5px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}th{color:var(--muted)}.scroll{overflow:auto}
 .rank1{font-weight:800;background:#f7fbff}.small{font-size:12px;color:var(--muted)}
 @media(max-width:700px){.grid{grid-template-columns:1fr 1fr}.row,.two{grid-template-columns:1fr}.wrap{padding:9px}.metric strong{font-size:18px}}
+
+/* ===== v47.2 スマホ表示改善 ===== */
+@media (max-width:760px){
+  body{overflow-x:hidden}
+  .wrap{width:100%;max-width:100%;padding-left:12px;padding-right:12px;box-sizing:border-box}
+  .top{align-items:flex-start}
+  h1{font-size:30px;line-height:1.12;overflow-wrap:anywhere}
+  nav{display:grid!important;grid-template-columns:repeat(2,minmax(0,1fr))!important;gap:10px!important;width:100%!important}
+  nav a{min-width:0!important;width:100%!important;min-height:58px;padding:12px 10px!important;
+        display:flex!important;align-items:center;justify-content:center;text-align:center;
+        white-space:normal!important;word-break:keep-all!important;overflow-wrap:normal!important;
+        line-height:1.25!important;font-size:18px!important;box-sizing:border-box}
+  nav a:last-child:nth-child(odd){grid-column:1/-1}
+  .badge{white-space:normal!important;text-align:center}
+  table{font-size:15px}
+  th,td{padding:10px 8px!important;vertical-align:top}
+  .card{padding:16px!important}
+}
+@media (max-width:430px){
+  nav a{font-size:17px!important;min-height:56px}
+  h1{font-size:29px}
+}
+
 """
 
 
@@ -763,7 +786,7 @@ def page(body, title=APP_TITLE):
     return f"""<!doctype html><html lang="ja"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-title" content="地方競馬v47">
+<meta name="apple-mobile-web-app-title" content="地方競馬v47.2">
 <title>{html.escape(title)}</title><style>{CSS}</style></head><body><div class="wrap">
 <div class="head"><h1>{APP_TITLE}</h1><span class="badge">スマホ完全版</span></div>
 <div class="nav">
