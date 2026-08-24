@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-地方競馬ワイド投票管理 v47.7 - 単独的中プラス配分版
+地方競馬ワイド投票管理 v47.8 - 最低利益必要額自動計算版
 
 主な追加:
 - NAR公式サイトから当日のワイドオッズ・単勝/複勝データを取得
@@ -31,7 +31,7 @@ from pathlib import Path
 from flask import Flask, request, redirect, url_for
 
 JST = timezone(timedelta(hours=9))
-APP_TITLE = "地方競馬 ワイド投票管理 v47.7"
+APP_TITLE = "地方競馬 ワイド投票管理 v47.8"
 DAILY_LIMIT = 3000
 DEFAULT_BET = 300
 SPAT4_URL = "https://www.spat4.jp/keiba/pc"
@@ -700,8 +700,9 @@ def weighted_amounts(recommendations, usable):
     return amounts
 
 
-def positive_profit_amounts(recommendations, usable, min_profit=100):
-    if len(recommendations) < 3 or usable < 300:
+def positive_profit_amounts(recommendations, max_budget, min_profit=100):
+    """3点のどれか1点だけ的中しても min_profit 以上になる最小購入額を探す。"""
+    if len(recommendations) < 3 or max_budget < 300:
         return None
 
     odds = []
@@ -711,7 +712,7 @@ def positive_profit_amounts(recommendations, usable, min_profit=100):
             return None
         odds.append(odd)
 
-    # 逆数和が1以上なら、3点すべてを「単独的中でもプラス」にすることは不可能
+    # 3点ダッチングが数学的に成立しない組み合わせは除外
     if sum(1.0 / x for x in odds) >= 1.0:
         return None
 
@@ -721,15 +722,18 @@ def positive_profit_amounts(recommendations, usable, min_profit=100):
         reverse=True,
     )
 
-    for target_total in range(int(usable // 100) * 100, 299, -100):
+    max_total = int(max_budget // 100) * 100
+    for target_total in range(300, max_total + 100, 100):
         amounts = []
         for odd in odds:
+            # 下限オッズで target_total + min_profit 以上の払戻になる最小100円単位
             need = int(((target_total + min_profit) / odd + 99) // 100 * 100)
             amounts.append(max(100, need))
 
         if sum(amounts) > target_total:
             continue
 
+        # 余りは優先度の高い候補から100円ずつ上乗せ
         remain = target_total - sum(amounts)
         idx = 0
         while remain >= 100:
@@ -749,6 +753,8 @@ def allocate_amounts(grade, recommendations, remaining_budget):
         "amounts": [0] * len(recommendations),
         "all_positive": False,
         "note": "",
+        "preferred_budget": 0,
+        "actual_budget": 0,
     }
 
     if not recommendations or remaining_budget < 100:
@@ -759,22 +765,39 @@ def allocate_amounts(grade, recommendations, remaining_budget):
         result["note"] = "B以下は自動購入額を表示しません。"
         return result
 
-    usable = int((remaining_budget * ratio) // 100 * 100)
-    if len(recommendations) >= 3 and usable < 300:
-        if remaining_budget >= 300:
-            usable = 300
-        else:
-            return result
+    preferred = int((remaining_budget * ratio) // 100 * 100)
+    if len(recommendations) >= 3 and preferred < 300:
+        preferred = 300 if remaining_budget >= 300 else 0
+    result["preferred_budget"] = preferred
 
-    positive = positive_profit_amounts(recommendations, usable, min_profit=100)
+    # v47.8: 推奨比率の上限に固定せず、残り予算内で最低+100円を実現する最小総額を探す
+    positive = positive_profit_amounts(recommendations, remaining_budget, min_profit=100)
     if positive:
+        actual = sum(positive)
         result["amounts"] = positive
+        result["actual_budget"] = actual
         result["all_positive"] = True
-        result["note"] = "保守的に下限オッズを使い、3点のどれが1点だけ的中しても最低 +100円以上になるよう自動配分しています。"
+        if preferred and actual > preferred:
+            result["note"] = (
+                f"下限オッズ基準で3点すべてを単独的中でも最低 +100円以上にするため、"
+                f"通常の参考予算 {preferred:,}円ではなく、必要最小額 {actual:,}円に自動調整しました。"
+            )
+        else:
+            result["note"] = (
+                f"下限オッズ基準で、3点のどれが1点だけ的中しても最低 +100円以上になるよう "
+                f"合計 {actual:,}円で自動配分しています。"
+            )
         return result
 
-    result["amounts"] = weighted_amounts(recommendations, usable)
-    result["note"] = "この3点は保守的な下限オッズでは『どれか1点だけ的中でもプラス』配分を作れないため、通常の参考配分を表示しています。"
+    # 条件を作れない場合のみ、従来の参考予算内で配分
+    if preferred <= 0:
+        return result
+    result["amounts"] = weighted_amounts(recommendations, preferred)
+    result["actual_budget"] = sum(result["amounts"])
+    result["note"] = (
+        "残り予算内では、下限オッズ基準で『3点のどれが1点だけ的中しても最低 +100円』"
+        "という配分を作れません。通常の参考配分を表示しています。"
+    )
     return result
 
 
@@ -974,7 +997,7 @@ table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:8px 5px;b
 }
 
 
-/* ===== v47.7 単独的中プラス配分 ===== */
+/* ===== v47.8 最低利益必要額自動計算 ===== */
 .summary-strip{
   display:grid;
   grid-template-columns:repeat(3,1fr);
@@ -1031,7 +1054,7 @@ def page(body, title=APP_TITLE):
     return f"""<!doctype html><html lang="ja"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-title" content="地方競馬v47.7">
+<meta name="apple-mobile-web-app-title" content="地方競馬v47.8">
 <title>{html.escape(title)}</title><style>{CSS}</style></head><body><div class="wrap">
 <div class="head"><h1>{APP_TITLE}</h1><span class="badge">スマホ完全版</span></div>
 <div class="nav">
