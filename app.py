@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-地方競馬ワイド投票管理 v47.5 - スマホ完全版
+地方競馬ワイド投票管理 v47.6 - スマホ完全版
 
 主な追加:
 - NAR公式サイトから当日のワイドオッズ・単勝/複勝データを取得
@@ -31,7 +31,7 @@ from pathlib import Path
 from flask import Flask, request, redirect, url_for
 
 JST = timezone(timedelta(hours=9))
-APP_TITLE = "地方競馬 ワイド投票管理 v47.5"
+APP_TITLE = "地方競馬 ワイド投票管理 v47.6"
 DAILY_LIMIT = 3000
 DEFAULT_BET = 300
 SPAT4_URL = "https://www.spat4.jp/keiba/pc"
@@ -907,6 +907,57 @@ table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:8px 5px;b
   }
 }
 
+
+/* ===== v47.6 ホーム購入確認・想定損益 ===== */
+.summary-strip{
+  display:grid;
+  grid-template-columns:repeat(3,1fr);
+  gap:8px;
+  margin-bottom:12px
+}
+.summary-strip>div,
+.settle-card{
+  background:#f5f8fb;
+  border:1px solid #dce4ee;
+  border-radius:14px;
+  padding:12px
+}
+.summary-strip span,
+.settle-grid span{
+  display:block;
+  color:#68778c;
+  font-size:12px;
+  margin-bottom:4px
+}
+.summary-strip strong{font-size:19px}
+.mobile-settles{display:none}
+.settle-card{margin-bottom:10px}
+.settle-combo{
+  font-size:25px;
+  font-weight:900;
+  margin-bottom:10px
+}
+.settle-grid{
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  gap:8px
+}
+.settle-grid>div{
+  background:#fff;
+  border-radius:10px;
+  padding:9px
+}
+.settle-grid strong{
+  display:block;
+  font-size:17px
+}
+@media(max-width:760px){
+  .summary-strip{grid-template-columns:1fr 1fr}
+  .summary-strip>div:first-child{grid-column:1/-1}
+  .desktop-settles{display:none!important}
+  .mobile-settles{display:block}
+}
+
 """
 
 
@@ -914,7 +965,7 @@ def page(body, title=APP_TITLE):
     return f"""<!doctype html><html lang="ja"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-title" content="地方競馬v47.5">
+<meta name="apple-mobile-web-app-title" content="地方競馬v47.6">
 <title>{html.escape(title)}</title><style>{CSS}</style></head><body><div class="wrap">
 <div class="head"><h1>{APP_TITLE}</h1><span class="badge">スマホ完全版</span></div>
 <div class="nav">
@@ -946,15 +997,38 @@ def home():
 
     calc = ""
     if bets:
-        trs = "".join(
-            f"<tr><td>{html.escape(b['combo'])}</td><td>{b['odds'] or '-'}倍</td>"
-            f"<td>{b['amount']:,}円</td><td>{b['expected']:,}円</td></tr>"
-            for b in bets
-        )
         total = sum(b["amount"] for b in bets)
-        calc = f"""<div class="card"><div class="title">直近の計算</div>
-        <div class="scroll"><table><tr><th>買い目</th><th>オッズ</th><th>購入額</th><th>参考払戻</th></tr>{trs}</table></div>
-        <p><strong>合計 {total:,}円</strong></p>
+        trs = ""
+        result_cards = ""
+        for b in bets:
+            net = b["expected"] - total
+            net_text = f"{net:+,}円"
+            trs += (
+                f"<tr><td>{html.escape(b['combo'])}</td><td>{b['odds'] or '-'}倍</td>"
+                f"<td>{b['amount']:,}円</td><td>{b['expected']:,}円</td><td>{net_text}</td></tr>"
+            )
+            result_cards += (
+                f'<div class="settle-card">'
+                f'<div class="settle-combo">{html.escape(b["combo"])}</div>'
+                f'<div class="settle-grid">'
+                f'<div><span>購入額</span><strong>{b["amount"]:,}円</strong></div>'
+                f'<div><span>基準オッズ</span><strong>{b["odds"] or "-"}倍</strong></div>'
+                f'<div><span>想定払戻</span><strong>{b["expected"]:,}円</strong></div>'
+                f'<div><span>1点的中時の損益</span><strong>{net_text}</strong></div>'
+                f'</div></div>'
+            )
+
+        calc = f"""<div class="card"><div class="title">3点の購入確認・想定損益</div>
+        <div class="summary-strip">
+          <div><span>合計購入額</span><strong>{total:,}円</strong></div>
+          <div><span>残り予算（購入前）</span><strong>{s['remaining']:,}円</strong></div>
+          <div><span>購入後の残り</span><strong>{max(0, s['remaining']-total):,}円</strong></div>
+        </div>
+        <div class="mobile-settles">{result_cards}</div>
+        <div class="desktop-settles scroll"><table>
+          <tr><th>買い目</th><th>基準オッズ</th><th>購入額</th><th>想定払戻</th><th>1点的中時損益</th></tr>{trs}
+        </table></div>
+        <div class="note">想定払戻・損益は保存された基準オッズによる参考計算です。実際の払戻は締切時の最終オッズで変わります。</div>
         <div class="actions">
         <form method="post" action="/record"><button class="green">SPAT4で購入後、この内容を購入記録</button></form>
         <a class="btn" href="{SPAT4_URL}" target="_blank" rel="noopener">SPAT4公式サイトを開く</a>
@@ -1141,7 +1215,7 @@ def apply_recommendations():
         vals[f"odds{i}"] = to_float(request.form.get(f"odds{i}", ""), 0.0)
         vals[f"amount{i}"] = max(100, to_int(request.form.get(f"amount{i}", ""), DEFAULT_BET)) if vals[f"wide{i}"] else 0
     write_draft(vals)
-    return redirect(url_for("home", msg="3点候補をホームへ入力しました。購入前に内容・最新オッズをご確認ください。"))
+    return redirect(url_for("home", msg="3点候補を自動入力しました。下に合計購入額・想定払戻・1点的中時の損益を表示しています。"))
 
 
 @app.post("/record")
