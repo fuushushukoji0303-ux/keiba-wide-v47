@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-地方競馬ワイド投票管理 v47.8 - 最低利益必要額自動計算版
+地方競馬ワイド投票管理 v47.9 - 成績自動集計版
 
 主な追加:
 - NAR公式サイトから当日のワイドオッズ・単勝/複勝データを取得
@@ -31,7 +31,7 @@ from pathlib import Path
 from flask import Flask, request, redirect, url_for
 
 JST = timezone(timedelta(hours=9))
-APP_TITLE = "地方競馬 ワイド投票管理 v47.8"
+APP_TITLE = "地方競馬 ワイド投票管理 v47.9"
 DAILY_LIMIT = 3000
 DEFAULT_BET = 300
 SPAT4_URL = "https://www.spat4.jp/keiba/pc"
@@ -1047,6 +1047,111 @@ table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:8px 5px;b
   .mobile-settles{display:block}
 }
 
+
+/* ===== v47.9 成績履歴・自動集計 ===== */
+.stats-grid{
+  display:grid;
+  grid-template-columns:repeat(4,minmax(0,1fr));
+  gap:10px
+}
+.stats-grid>div{
+  background:#f5f8fb;
+  border:1px solid #dce4ee;
+  border-radius:14px;
+  padding:12px
+}
+.stats-grid span{
+  display:block;
+  color:#68778c;
+  font-size:12px;
+  margin-bottom:4px
+}
+.stats-grid strong{
+  display:block;
+  font-size:20px
+}
+.mobile-history{display:none}
+.history-card{
+  background:#f7f9fc;
+  border:1px solid #d8e2ec;
+  border-radius:18px;
+  padding:14px;
+  margin-bottom:12px
+}
+.history-card-head{
+  display:flex;
+  justify-content:space-between;
+  align-items:flex-start;
+  gap:10px;
+  margin-bottom:10px
+}
+.history-race{
+  font-size:22px;
+  font-weight:900
+}
+.result-badge{
+  display:inline-block;
+  padding:6px 10px;
+  border-radius:999px;
+  font-weight:800;
+  font-size:13px
+}
+.result-badge.pending{background:#eef3f8;color:#5d6d80}
+.result-badge.hit{background:#e8f7ee;color:#17723c}
+.result-badge.miss{background:#fdecec;color:#a52b2b}
+.history-bets{
+  white-space:normal;
+  overflow-wrap:anywhere;
+  background:#fff;
+  border-radius:12px;
+  padding:10px;
+  margin-bottom:10px;
+  line-height:1.5
+}
+.history-mini-grid{
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  gap:8px;
+  margin-bottom:10px
+}
+.history-mini-grid>div{
+  background:#fff;
+  border-radius:12px;
+  padding:10px
+}
+.history-mini-grid span{
+  display:block;
+  color:#68778c;
+  font-size:12px;
+  margin-bottom:3px
+}
+.history-mini-grid strong{font-size:18px}
+.history-result-form input{
+  width:100%;
+  margin-bottom:8px
+}
+.history-result-buttons{
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  gap:8px
+}
+.history-result-buttons button{
+  width:100%;
+  min-height:48px
+}
+.history-final{
+  background:#fff;
+  border-radius:12px;
+  padding:10px;
+  line-height:1.6
+}
+@media(max-width:760px){
+  .stats-grid{grid-template-columns:1fr 1fr}
+  .stats-grid>div:nth-child(4){grid-column:1/-1}
+  .desktop-history{display:none!important}
+  .mobile-history{display:block}
+}
+
 """
 
 
@@ -1054,7 +1159,7 @@ def page(body, title=APP_TITLE):
     return f"""<!doctype html><html lang="ja"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-title" content="地方競馬v47.8">
+<meta name="apple-mobile-web-app-title" content="地方競馬v47.9">
 <title>{html.escape(title)}</title><style>{CSS}</style></head><body><div class="wrap">
 <div class="head"><h1>{APP_TITLE}</h1><span class="badge">スマホ完全版</span></div>
 <div class="nav">
@@ -1335,7 +1440,7 @@ def record():
             bet_text, total, "未確定", 0,
         ))
 
-    return redirect(url_for("history", msg="購入記録を追加しました。"))
+    return redirect(url_for("history", msg="購入記録を追加しました。レース終了後、この画面で「的中」または「ハズレ」を押すだけで成績が自動集計されます。"))
 
 
 @app.get("/picks")
@@ -1373,10 +1478,58 @@ def history():
         rows = con.execute(
             "SELECT * FROM purchases ORDER BY id DESC LIMIT 200"
         ).fetchall()
+        all_rows = con.execute(
+            "SELECT * FROM purchases ORDER BY id DESC"
+        ).fetchall()
+
+    def make_stats(source):
+        confirmed = [r for r in source if r["result"] in ("的中", "ハズレ")]
+        hits = [r for r in confirmed if r["result"] == "的中"]
+        pending = [r for r in source if r["result"] == "未確定"]
+
+        bet = sum(int(r["total_bet"]) for r in confirmed)
+        ret = sum(int(r["return_amount"]) for r in confirmed)
+        profit = ret - bet
+        hit_rate = (len(hits) / len(confirmed) * 100) if confirmed else 0.0
+        recovery = (ret / bet * 100) if bet else 0.0
+
+        return {
+            "confirmed": len(confirmed),
+            "hits": len(hits),
+            "pending": len(pending),
+            "bet": bet,
+            "ret": ret,
+            "profit": profit,
+            "hit_rate": hit_rate,
+            "recovery": recovery,
+        }
+
+    overall = make_stats(all_rows)
+    today_rows = [r for r in all_rows if r["race_date"] == today()]
+    today_stats = make_stats(today_rows)
+
+    def stats_cards(title, s):
+        return f"""
+        <div class="card stats-card">
+          <div class="title">{html.escape(title)}</div>
+          <div class="stats-grid">
+            <div><span>確定レース</span><strong>{s["confirmed"]}件</strong></div>
+            <div><span>的中率</span><strong>{s["hit_rate"]:.1f}%</strong></div>
+            <div><span>回収率</span><strong>{s["recovery"]:.1f}%</strong></div>
+            <div><span>確定収支</span><strong>{s["profit"]:+,}円</strong></div>
+            <div><span>総購入額</span><strong>{s["bet"]:,}円</strong></div>
+            <div><span>総払戻額</span><strong>{s["ret"]:,}円</strong></div>
+            <div><span>未確定</span><strong>{s["pending"]}件</strong></div>
+          </div>
+        </div>
+        """
 
     trs = ""
+    mobile_cards = ""
     for r in rows:
         profit = int(r["return_amount"]) - int(r["total_bet"])
+        result_badge = "pending" if r["result"] == "未確定" else ("hit" if r["result"] == "的中" else "miss")
+
         trs += f"""<tr>
         <td>{html.escape(r['created_at'])}</td>
         <td>{html.escape(r['course'])} {html.escape(r['race'])}</td>
@@ -1391,13 +1544,53 @@ def history():
           <button class="red" name="kind" value="miss">ハズレ</button>
         </form></td></tr>"""
 
+        if r["result"] == "未確定":
+            result_form = f"""
+            <form method="post" action="/result/{r['id']}" class="history-result-form">
+              <input name="return_amount" inputmode="numeric" placeholder="的中時の払戻額">
+              <div class="history-result-buttons">
+                <button class="green" name="kind" value="hit">的中で記録</button>
+                <button class="red" name="kind" value="miss">ハズレで記録</button>
+              </div>
+            </form>
+            """
+        else:
+            result_form = f"""
+            <div class="history-final">
+              払戻 <strong>{r['return_amount']:,}円</strong>　
+              収支 <strong>{profit:+,}円</strong>
+            </div>
+            """
+
+        mobile_cards += f"""
+        <div class="history-card">
+          <div class="history-card-head">
+            <div>
+              <div class="history-race">{html.escape(r['course'])} {html.escape(r['race'])}</div>
+              <div class="small">{html.escape(r['created_at'])}</div>
+            </div>
+            <span class="result-badge {result_badge}">{html.escape(r['result'])}</span>
+          </div>
+          <div class="history-bets">{html.escape(r['bets'])}</div>
+          <div class="history-mini-grid">
+            <div><span>購入額</span><strong>{r['total_bet']:,}円</strong></div>
+            <div><span>払戻額</span><strong>{r['return_amount']:,}円</strong></div>
+          </div>
+          {result_form}
+        </div>
+        """
+
     if not trs:
         trs = '<tr><td colspan="8">履歴はまだありません。</td></tr>'
+        mobile_cards = '<div class="note">履歴はまだありません。</div>'
 
     return page(
         (f'<div class="ok">{html.escape(msg)}</div>' if msg else "")
+        + stats_cards("本日の成績", today_stats)
+        + stats_cards("通算成績", overall)
         + f"""<div class="card"><div class="title">成績履歴</div>
-        <div class="scroll"><table>
+        <div class="mobile-history">{mobile_cards}</div>
+        <div class="desktop-history scroll"><table>
         <tr><th>日時</th><th>レース</th><th>買い目</th><th>購入</th><th>結果</th><th>払戻</th><th>収支</th><th>結果入力</th></tr>
         {trs}</table></div></div>""",
         "成績履歴"
