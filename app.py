@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-地方競馬ワイド投票管理 v48.0 - 成績分析版
+地方競馬ワイド投票管理 v48.1 - 会員ログイン準備版
 
 主な追加:
 - NAR公式サイトから当日のワイドオッズ・単勝/複勝データを取得
@@ -28,10 +28,10 @@ from datetime import datetime, timezone, timedelta
 from html.parser import HTMLParser
 from pathlib import Path
 
-from flask import Flask, request, redirect, url_for
+from flask import Flask, request, redirect, url_for, session
 
 JST = timezone(timedelta(hours=9))
-APP_TITLE = "地方競馬 ワイド投票管理 v48.0"
+APP_TITLE = "地方競馬 ワイド投票管理 v48.1"
 DAILY_LIMIT = 3000
 DEFAULT_BET = 300
 SPAT4_URL = "https://www.spat4.jp/keiba/pc"
@@ -49,6 +49,13 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 DB_PATH = DATA_DIR / "wide_v47.sqlite3"
 
 app = Flask(__name__)
+app.secret_key = os.environ.get("FLASK_SECRET_KEY", "change-this-secret-before-selling")
+
+# v48.1 会員ログイン
+# RenderのEnvironment Variablesで MEMBER_ID / MEMBER_PASSWORD を設定すると保護が有効になります。
+MEMBER_ID = os.environ.get("MEMBER_ID", "").strip()
+MEMBER_PASSWORD = os.environ.get("MEMBER_PASSWORD", "").strip()
+LOGIN_ENABLED = bool(MEMBER_ID and MEMBER_PASSWORD)
 
 
 def now():
@@ -1227,6 +1234,22 @@ table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:8px 5px;b
   .highlight-grid{grid-template-columns:1fr}
 }
 
+
+/* ===== v48.1 会員ログイン ===== */
+.member-status{
+  margin:8px 0 12px;
+  padding:8px 12px;
+  border-radius:10px;
+  background:#eef6ff;
+  color:#375a7f;
+  font-size:13px
+}
+.member-status a{font-weight:800}
+.member-status.setup{
+  background:#fff8e8;
+  color:#775112;
+}
+
 """
 
 
@@ -1234,7 +1257,7 @@ def page(body, title=APP_TITLE):
     return f"""<!doctype html><html lang="ja"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-title" content="地方競馬v48.0">
+<meta name="apple-mobile-web-app-title" content="地方競馬v48.1">
 <title>{html.escape(title)}</title><style>{CSS}</style></head><body><div class="wrap">
 <div class="head"><h1>{APP_TITLE}</h1><span class="badge">スマホ完全版</span></div>
 <div class="nav">
@@ -1245,10 +1268,100 @@ def page(body, title=APP_TITLE):
 <a class="btn secondary" href="/analytics">成績分析</a>
 <a class="btn secondary" href="/courses">本日の開催</a>
 </div>
+{('<div class="member-status">会員ログイン中：' + html.escape(str(session.get("member_id",""))) + '　<a href="/logout">ログアウト</a></div>') if LOGIN_ENABLED and session.get("member_authenticated") else ('<div class="member-status setup">販売前：会員ログイン未設定</div>' if not LOGIN_ENABLED else '')}
 {body}
 <div class="note">3点候補・参考ランクは市場オッズを使ったルールベースの参考情報です。的中・利益を保証しません。SPAT4のログイン情報は保存せず、実際の投票・最終確認はSPAT4公式サイトでご自身で行ってください。</div>
 </div></body></html>"""
 
+
+
+def login_page(message=""):
+    status = ""
+    if not LOGIN_ENABLED:
+        status = """
+        <div class="note">
+          現在は会員ログイン保護が未設定です。販売前にRenderのEnvironment Variablesへ
+          MEMBER_ID / MEMBER_PASSWORD / FLASK_SECRET_KEY を設定してください。
+        </div>
+        """
+    msg_html = f'<div class="note">{html.escape(message)}</div>' if message else ""
+    return f"""<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>{html.escape(APP_TITLE)} - 会員ログイン</title>
+<style>
+*{{box-sizing:border-box}}
+body{{margin:0;background:#f2f6fb;color:#142033;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans JP",sans-serif}}
+.login-wrap{{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px}}
+.login-card{{width:min(520px,100%);background:#fff;border:1px solid #d8e2ec;border-radius:24px;padding:24px;box-shadow:0 8px 24px rgba(20,32,51,.06)}}
+.login-title{{font-size:28px;font-weight:900;margin-bottom:6px}}
+.login-sub{{color:#68778c;margin-bottom:20px;line-height:1.6}}
+label{{display:block;font-weight:800;margin:14px 0 6px}}
+input{{width:100%;padding:14px;border:1px solid #ccd8e5;border-radius:12px;font-size:17px}}
+button{{width:100%;margin-top:18px;padding:14px;border:0;border-radius:14px;background:#168b4b;color:#fff;font-size:18px;font-weight:900}}
+.note{{margin-top:14px;padding:12px;border:1px solid #efd18c;background:#fff8e8;border-radius:12px;color:#775112;line-height:1.6}}
+.small{{font-size:12px;color:#68778c;margin-top:16px;line-height:1.6}}
+</style>
+</head>
+<body>
+<div class="login-wrap">
+  <div class="login-card">
+    <div class="login-title">会員ログイン</div>
+    <div class="login-sub">{html.escape(APP_TITLE)}<br>スマホ・パソコン共通のログインです。</div>
+    {msg_html}
+    {status}
+    <form method="post" action="/login">
+      <label>会員ID</label>
+      <input name="member_id" autocomplete="username" required>
+      <label>パスワード</label>
+      <input name="password" type="password" autocomplete="current-password" required>
+      <button>ログイン</button>
+    </form>
+    <div class="small">SPAT4のログイン情報とは別です。このアプリ用の会員ID・パスワードです。</div>
+  </div>
+</div>
+</body>
+</html>"""
+
+
+@app.before_request
+def require_member_login():
+    if request.endpoint in ("login", "logout", "health", "static"):
+        return None
+    if not LOGIN_ENABLED:
+        return None
+    if session.get("member_authenticated") is True:
+        return None
+    return redirect(url_for("login", next=request.path))
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if not LOGIN_ENABLED:
+        # 未設定時はアプリをロックしない。販売前にRender側で設定する。
+        return redirect(url_for("home"))
+
+    if request.method == "POST":
+        member_id = request.form.get("member_id", "").strip()
+        password = request.form.get("password", "")
+        if member_id == MEMBER_ID and password == MEMBER_PASSWORD:
+            session["member_authenticated"] = True
+            session["member_id"] = member_id
+            next_url = request.args.get("next") or url_for("home")
+            if not str(next_url).startswith("/"):
+                next_url = url_for("home")
+            return redirect(next_url)
+        return login_page("会員IDまたはパスワードが違います。")
+
+    return login_page()
+
+
+@app.get("/logout")
+def logout():
+    session.clear()
+    return redirect(url_for("login"))
 
 @app.get("/")
 def home():
