@@ -1,0 +1,8 @@
+services:
+  - type: web
+    name: keiba-wide-v47
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app
+    healthCheckPath: /health
