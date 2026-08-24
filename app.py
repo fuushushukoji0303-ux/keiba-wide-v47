@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-地方競馬ワイド投票管理 v47.4 - スマホ完全版
+地方競馬ワイド投票管理 v47.5 - スマホ完全版
 
 主な追加:
 - NAR公式サイトから当日のワイドオッズ・単勝/複勝データを取得
@@ -31,7 +31,7 @@ from pathlib import Path
 from flask import Flask, request, redirect, url_for
 
 JST = timezone(timedelta(hours=9))
-APP_TITLE = "地方競馬 ワイド投票管理 v47.4"
+APP_TITLE = "地方競馬 ワイド投票管理 v47.5"
 DAILY_LIMIT = 3000
 DEFAULT_BET = 300
 SPAT4_URL = "https://www.spat4.jp/keiba/pc"
@@ -844,6 +844,69 @@ table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:8px 5px;b
 }
 
 
+
+/* ===== v47.5 3点候補スマホカード表示 ===== */
+.mobile-picks{display:none}
+@media(max-width:760px){
+  .desktop-picks{display:none!important}
+  .mobile-picks{display:block}
+  .pick-card{
+    border:1px solid #d7e2ee;
+    border-radius:18px;
+    padding:14px;
+    margin:0 0 12px;
+    background:#fff
+  }
+  .pick-card-top{border-width:2px}
+  .pick-rank{
+    font-size:14px;
+    font-weight:800;
+    color:#6d7f95;
+    margin-bottom:4px
+  }
+  .pick-combo{
+    font-size:28px;
+    line-height:1.1;
+    font-weight:900;
+    margin-bottom:12px
+  }
+  .pick-grid{
+    display:grid;
+    grid-template-columns:1fr 1fr;
+    gap:10px
+  }
+  .pick-grid>div{
+    background:#f5f8fb;
+    border-radius:12px;
+    padding:10px
+  }
+  .pick-grid span{
+    display:block;
+    font-size:12px;
+    color:#6d7f95;
+    margin-bottom:3px
+  }
+  .pick-grid strong{
+    display:block;
+    font-size:18px
+  }
+  .pick-grid small{
+    display:block;
+    margin-top:2px;
+    color:#6d7f95
+  }
+  .pick-amount{
+    margin-top:12px;
+    padding-top:10px;
+    border-top:1px solid #e1e7ee;
+    font-size:15px
+  }
+  .pick-amount strong{
+    font-size:22px;
+    margin-left:6px
+  }
+}
+
 """
 
 
@@ -851,7 +914,7 @@ def page(body, title=APP_TITLE):
     return f"""<!doctype html><html lang="ja"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-title" content="地方競馬v47.4">
+<meta name="apple-mobile-web-app-title" content="地方競馬v47.5">
 <title>{html.escape(title)}</title><style>{CSS}</style></head><body><div class="wrap">
 <div class="head"><h1>{APP_TITLE}</h1><span class="badge">スマホ完全版</span></div>
 <div class="nav">
@@ -998,6 +1061,7 @@ def analyze():
     amounts = allocate_amounts(result["grade"], recs, summary()["remaining"])
 
     rec_rows = ""
+    rec_cards = ""
     hidden = ""
     for idx, item in enumerate(recs, start=1):
         amount = amounts[idx - 1] if idx - 1 < len(amounts) else 0
@@ -1009,6 +1073,19 @@ def analyze():
             f'<td>{item.get("priority_score", 0):.1f}</td>'
             f'<td>{item.get("ev_index", 0):.2f}<br><span class="small">{html.escape(item.get("ev_label",""))}</span></td>'
             f'<td>{amount:,}円</td></tr>'
+        )
+        rec_cards += (
+            f'<div class="pick-card {"pick-card-top" if idx == 1 else ""}>'
+            f'<div class="pick-rank">{idx}位</div>'
+            f'<div class="pick-combo">{html.escape(item["combo"])}</div>'
+            f'<div class="pick-grid">'
+            f'<div><span>オッズ</span><strong>{html.escape(item["display"])}倍</strong></div>'
+            f'<div><span>候補評価</span><strong>{item["confidence"]}点</strong></div>'
+            f'<div><span>優先度</span><strong>{item.get("priority_score", 0):.1f}</strong></div>'
+            f'<div><span>参考EV</span><strong>{item.get("ev_index", 0):.2f}</strong><small>{html.escape(item.get("ev_label",""))}</small></div>'
+            f'</div>'
+            f'<div class="pick-amount">推奨額 <strong>{amount:,}円</strong></div>'
+            f'</div>'
         )
         hidden += (
             f'<input type="hidden" name="wide{idx}" value="{html.escape(item["combo"])}">'
@@ -1033,10 +1110,11 @@ def analyze():
 
     <div class="card">
       <div class="title">3点候補</div>
-      <div class="scroll"><table>
+      <div class="desktop-picks scroll"><table>
       <tr><th>順位</th><th>ワイド</th><th>オッズ</th><th>候補評価</th><th>優先度</th><th>参考EV</th><th>推奨額</th></tr>
       {rec_rows or '<tr><td colspan="7">候補を3点作れませんでした。</td></tr>'}
       </table></div>
+      <div class="mobile-picks">{rec_cards or '<div class="note">候補を3点作れませんでした。</div>'}</div>
       {"<form method='post' action='/apply_recommendations'>" + hidden +
        f"<input type='hidden' name='course' value='{html.escape(course)}'>"
        f"<input type='hidden' name='race' value='{race}R'>"
