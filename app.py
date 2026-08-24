@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-地方競馬ワイド投票管理 v47 - スマホ完全版
+地方競馬ワイド投票管理 v47.1 - スマホ完全版
 
 主な追加:
 - NAR公式サイトから当日のワイドオッズ・単勝/複勝データを取得
@@ -31,7 +31,7 @@ from pathlib import Path
 from flask import Flask, request, redirect, url_for
 
 JST = timezone(timedelta(hours=9))
-APP_TITLE = "地方競馬 ワイド投票管理 v47"
+APP_TITLE = "地方競馬 ワイド投票管理 v47.1"
 DAILY_LIMIT = 3000
 DEFAULT_BET = 300
 SPAT4_URL = "https://www.spat4.jp/keiba/pc"
@@ -1110,7 +1110,7 @@ def courses():
     trs = "".join(
         f"<tr><td><strong>{html.escape(c)}</strong></td>"
         f"<td>{', '.join(str(x) + 'R' for x in r)}</td>"
-        f"<td><a class='btn secondary' href='/analyze?course={urllib.parse.quote(c)}&race={r[-1]}&mode=バランス'>分析へ</a></td></tr>"
+        f"<td><a class='btn secondary' href='{html.escape(url_for('analyze', course=c, race=r[-1], mode='バランス'), quote=True)}'>分析へ</a></td></tr>"
         for c, r in items
     )
 
