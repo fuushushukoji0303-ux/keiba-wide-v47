@@ -1083,6 +1083,97 @@ table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:8px 5px;b
   .pick-combo{font-size:30px}
 }
 
+
+/* ===== 3点候補カード最終整形 ===== */
+.pick-cards{
+  display:grid !important;
+  grid-template-columns:repeat(3,minmax(0,1fr)) !important;
+  gap:14px !important;
+  align-items:stretch !important;
+  width:100% !important;
+}
+.pick-card{
+  display:flex !important;
+  flex-direction:column !important;
+  gap:10px !important;
+  border:1px solid #d7e2ee !important;
+  border-radius:18px !important;
+  padding:14px !important;
+  background:#fff !important;
+  min-width:0 !important;
+  width:100% !important;
+  height:100% !important;
+  margin:0 !important;
+}
+.pick-rank-one{
+  border-width:2px !important;
+  box-shadow:0 0 0 2px rgba(22,119,255,.06) !important;
+}
+.pick-rank{
+  font-size:14px !important;
+  font-weight:800 !important;
+  color:#6d7f95 !important;
+  margin:0 !important;
+}
+.pick-combo{
+  font-size:30px !important;
+  line-height:1.05 !important;
+  font-weight:900 !important;
+  margin:0 !important;
+  word-break:keep-all !important;
+}
+.pick-grid{
+  display:grid !important;
+  grid-template-columns:1fr !important;
+  gap:8px !important;
+  margin:0 !important;
+}
+.pick-grid>div{
+  background:#f5f8fb !important;
+  border-radius:12px !important;
+  padding:10px !important;
+  min-width:0 !important;
+}
+.pick-grid span{
+  display:block !important;
+  font-size:12px !important;
+  color:#6d7f95 !important;
+  margin-bottom:3px !important;
+}
+.pick-grid strong{
+  display:block !important;
+  font-size:18px !important;
+  line-height:1.25 !important;
+}
+.pick-grid small{
+  display:block !important;
+  margin-top:2px !important;
+  color:#6d7f95 !important;
+  line-height:1.35 !important;
+}
+.pick-amount{
+  margin-top:auto !important;
+  padding-top:10px !important;
+  border-top:1px solid #e1e7ee !important;
+  font-size:15px !important;
+}
+.pick-amount strong{
+  font-size:22px !important;
+  margin-left:6px !important;
+}
+@media(max-width:900px){
+  .pick-cards{
+    grid-template-columns:1fr !important;
+  }
+  .pick-card{
+    height:auto !important;
+  }
+  .pick-combo{
+    font-size:28px !important;
+  }
+}
+
+
 /* ===== v47.8 最低利益必要額自動計算 ===== */
 .summary-strip{
   display:grid;
