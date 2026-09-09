@@ -1174,6 +1174,65 @@ table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:8px 5px;b
 }
 
 
+
+/* ===== 3点候補：1位〜3位 完全同一レイアウト ===== */
+.pick-cards{
+  display:grid !important;
+  grid-template-columns:1fr !important;
+  gap:14px !important;
+  width:100% !important;
+}
+.pick-card,
+.pick-card.pick-rank-one{
+  display:block !important;
+  width:100% !important;
+  height:auto !important;
+  margin:0 !important;
+  padding:14px !important;
+  border:1px solid #d7e2ee !important;
+  border-radius:18px !important;
+  background:#fff !important;
+  box-shadow:none !important;
+}
+.pick-rank{
+  display:block !important;
+  width:100% !important;
+  font-size:14px !important;
+  font-weight:800 !important;
+  color:#6d7f95 !important;
+  margin:0 0 8px !important;
+}
+.pick-combo{
+  display:block !important;
+  width:100% !important;
+  font-size:30px !important;
+  line-height:1.1 !important;
+  font-weight:900 !important;
+  margin:0 0 12px !important;
+}
+.pick-grid{
+  display:grid !important;
+  grid-template-columns:1fr !important;
+  gap:8px !important;
+  width:100% !important;
+  margin:0 !important;
+}
+.pick-grid>div{
+  display:block !important;
+  width:100% !important;
+  background:#f5f8fb !important;
+  border-radius:12px !important;
+  padding:10px !important;
+}
+.pick-amount{
+  display:block !important;
+  width:100% !important;
+  margin-top:12px !important;
+  padding-top:10px !important;
+  border-top:1px solid #e1e7ee !important;
+}
+
+
 /* ===== v47.8 最低利益必要額自動計算 ===== */
 .summary-strip{
   display:grid;
