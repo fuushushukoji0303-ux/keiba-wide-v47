@@ -6,7 +6,7 @@
 - NAR公式サイトから当日のワイドオッズ・単勝/複勝データを取得
 - PC版v44のルールをベースに「堅め / バランス / 穴狙い」の3点候補を算出
 - レース参考ランク（S+/S/S-/A/B/見送り）
-- 3点候補をホーム画面へ自動入力
+- 3点候補を画面上で確認
 - 条件の良いレースを「今日の勝負レース」に保存
 - 購入記録・的中/ハズレ・払戻・収支管理
 - SPAT4は公式サイトを開き、最終投票は利用者自身が行う
@@ -1818,7 +1818,7 @@ def analyze():
        f"<input type='hidden' name='course' value='{html.escape(course)}'>"
        f"<input type='hidden' name='race' value='{race}R'>"
        f"<input type='hidden' name='mode' value='{html.escape(mode)}'>"
-       "<button class='green'>この3点をホームへ入力</button></form>" if recs else ""}
+       "<button class='green'></button></form>" if recs else ""}
     </div>
 
     <div class="card">
@@ -1957,7 +1957,7 @@ def history():
     trs = ""
     mobile_cards = ""
     for r in rows:
-        profit = int(r["return_amount"]) - int(r["total_bet"])
+        profit = int(r["return_amount"]) - int(r["total_bet"]) if r["result"] in ("的中", "ハズレ") else None
         result_badge = "pending" if r["result"] == "未確定" else ("hit" if r["result"] == "的中" else "miss")
 
         trs += f"""<tr>
@@ -1967,7 +1967,7 @@ def history():
         <td>{r['total_bet']:,}円</td>
         <td>{html.escape(r['result'])}</td>
         <td>{r['return_amount']:,}円</td>
-        <td>{profit:+,}円</td>
+        <td>{"未確定" if profit is None else f"{profit:+,}円"}</td>
         <td><form method="post" action="/result/{r['id']}" style="display:flex;gap:4px;min-width:270px">
           <input name="return_amount" inputmode="numeric" placeholder="払戻額">
           <button class="green" name="kind" value="hit">的中</button>
@@ -1988,7 +1988,7 @@ def history():
             result_form = f"""
             <div class="history-final">
               払戻 <strong>{r['return_amount']:,}円</strong>　
-              収支 <strong>{profit:+,}円</strong>
+              収支 <strong>{"未確定" if profit is None else f"{profit:+,}円"}</strong>
             </div>
             """
 
