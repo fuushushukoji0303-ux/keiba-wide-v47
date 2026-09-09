@@ -1021,7 +1021,7 @@ table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:8px 5px;b
     margin:0 0 12px;
     background:#fff
   }
-  .pick-card-top{border-width:2px}
+  .pick-rank-one{border-width:2px;box-shadow:0 0 0 2px rgba(22,119,255,.06)}
   .pick-rank{
     font-size:14px;
     font-weight:800;
@@ -1615,7 +1615,7 @@ def analyze():
             f'<td>{amount:,}円</td></tr>'
         )
         rec_cards += (
-            f'<div class="pick-card {"pick-card-top" if idx == 1 else ""}>'
+            f'<div class="pick-card {"pick-rank-one" if idx == 1 else ""}>'
             f'<div class="pick-rank">{idx}位</div>'
             f'<div class="pick-combo">{html.escape(item["combo"])}</div>'
             f'<div class="pick-grid">'
