@@ -1945,18 +1945,8 @@ def picks():
 def history():
 
     def history_bet_chips(row):
-        raw = str(row["bet_text"] if "bet_text" in row.keys() else "")
-        if not raw:
-            # 既存DB列から再構成
-            parts = []
-            for i in range(1, 4):
-                combo = row[f"wide{i}"] if f"wide{i}" in row.keys() else ""
-                odds = row[f"odds{i}"] if f"odds{i}" in row.keys() else ""
-                amount = row[f"amount{i}"] if f"amount{i}" in row.keys() else ""
-                if combo:
-                    parts.append(f"{combo} {amount}円 @{odds}")
-        else:
-            parts = raw.split(" / ")
+        raw = str(row["bets"] or "")
+        parts = [p.strip() for p in raw.split(" / ") if p.strip()]
         chips = ""
         for part in parts:
             tokens = part.split(" ", 1)
@@ -2036,11 +2026,17 @@ def history():
         <td>{html.escape(r['result'])}</td>
         <td>{r['return_amount']:,}円</td>
         <td>{"未確定" if profit is None else f"{profit:+,}円"}</td>
-        <td><form method="post" action="/result/{r['id']}" style="display:flex;gap:4px;min-width:270px">
-          <input name="return_amount" inputmode="numeric" placeholder="払戻額">
-          <button class="green" name="kind" value="hit">的中</button>
-          <button class="red" name="kind" value="miss">ハズレ</button>
-        </form></td></tr>"""
+        <td>
+          <form method="post" action="/result/{r['id']}" style="display:flex;gap:4px;min-width:270px">
+            <input name="return_amount" inputmode="numeric" placeholder="払戻額">
+            <button class="green" name="kind" value="hit">的中</button>
+            <button class="red" name="kind" value="miss">ハズレ</button>
+          </form>
+          <form method="post" action="/history/delete/{r['id']}" style="margin-top:6px"
+                onsubmit="return confirm('この履歴を削除しますか？');">
+            <button class="delete-btn" type="submit">この履歴を削除</button>
+          </form>
+        </td></tr>"""
 
         if r["result"] == "未確定":
             result_form = f"""
@@ -2069,12 +2065,16 @@ def history():
             </div>
             <span class="result-badge {result_badge}">{html.escape(r['result'])}</span>
           </div>
-          <div class="history-bets">{html.escape(r['bets'])}</div>
+          {history_bet_chips(r)}
           <div class="history-mini-grid">
             <div><span>購入額</span><strong>{r['total_bet']:,}円</strong></div>
             <div><span>払戻額</span><strong>{r['return_amount']:,}円</strong></div>
           </div>
           {result_form}
+          <form class="delete-form" method="post" action="/history/delete/{r['id']}"
+                onsubmit="return confirm('この履歴を削除しますか？');">
+            <button class="delete-btn" type="submit">この履歴を削除</button>
+          </form>
         </div>
         """
 
