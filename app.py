@@ -18,6 +18,8 @@
 """
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 import html
 import os
 import re
@@ -1290,6 +1292,25 @@ table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:8px 5px;b
 }
 
 
+
+/* ===== 本日の開催：レース指定・全レース一括予想 ===== */
+.course-block{border:1px solid #dce4ee;border-radius:18px;background:#fff;padding:14px;margin-bottom:12px}
+.course-head{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px}
+.course-name{font-size:23px;font-weight:900}
+.race-links{display:flex;flex-wrap:wrap;gap:7px}
+.race-chip{display:inline-flex;align-items:center;justify-content:center;min-width:52px;min-height:44px;padding:8px 11px;border-radius:12px;background:#edf2f7;color:#26384d;font-weight:900;text-decoration:none}
+.course-actions{display:flex;gap:8px;flex-wrap:wrap}
+.batch-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.batch-card{border:1px solid #dce4ee;border-radius:16px;padding:13px;background:#fff}
+.batch-card.good{border-width:2px}
+.batch-top{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:9px}
+.batch-race{font-size:22px;font-weight:900}
+.batch-grade{display:inline-flex;align-items:center;justify-content:center;min-width:52px;padding:6px 9px;border-radius:999px;background:#eef3f8;font-weight:900}
+.batch-picks{background:#f6f8fb;border-radius:12px;padding:9px;line-height:1.7;margin-bottom:9px}
+.batch-meta{font-size:12px;color:#68778c;margin-bottom:9px}
+@media(max-width:760px){.course-head{align-items:stretch}.course-head .course-actions{width:100%}.course-actions .btn{flex:1;text-align:center}.race-chip{min-width:48px;flex:1 0 48px}.batch-grid{grid-template-columns:1fr}}
+
+
 /* ===== v48.1 会員ログイン ===== */
 .member-status{
   margin:8px 0 12px;
@@ -1984,11 +2005,11 @@ def courses():
     items = []
     for c in NAR_COURSE_CODES:
         try:
-            r = race_numbers(c)
+            races = race_numbers(c)
         except Exception:
-            r = []
-        if r:
-            items.append((c, r))
+            races = []
+        if races:
+            items.append((c, races))
 
     if not items:
         return page(
@@ -1996,18 +2017,125 @@ def courses():
             "本日の開催"
         )
 
-    trs = "".join(
-        f"<tr><td><strong>{html.escape(c)}</strong></td>"
-        f"<td>{', '.join(str(x) + 'R' for x in r)}</td>"
-        f"<td><a class='btn green' href='{html.escape(url_for('analyze', course=c, race=r[-1], mode='バランス', auto=1), quote=True)}'>自動3点予想</a></td></tr>"
-        for c, r in items
-    )
+    blocks = ""
+    for c, races in items:
+        links = "".join(
+            f"<a class='race-chip' href='{html.escape(url_for('analyze', course=c, race=r, mode='バランス', auto=1), quote=True)}'>{r}R</a>"
+            for r in races
+        )
+        last_url = html.escape(url_for("analyze", course=c, race=races[-1], mode="バランス", auto=1), quote=True)
+        batch_url = html.escape(url_for("course_batch", course=c, mode="バランス"), quote=True)
+        blocks += f"""
+        <div class="course-block">
+          <div class="course-head">
+            <div class="course-name">{html.escape(c)}</div>
+            <div class="course-actions">
+              <a class="btn secondary" href="{last_url}">最終Rを予想</a>
+              <a class="btn green" href="{batch_url}">全レース一括予想</a>
+            </div>
+          </div>
+          <div class="small" style="margin-bottom:7px">好きなレースをタップすると、そのレースだけ3点予想します。</div>
+          <div class="race-links">{links}</div>
+        </div>
+        """
 
     return page(
-        f'<div class="card"><div class="title">本日の開催</div>'
-        f'<div class="note">「自動3点予想」を押すと、その競馬場の最終レースをバランスモードでそのまま分析します。</div>'
-        f'<table><tr><th>競馬場</th><th>レース</th><th></th></tr>{trs}</table></div>',
+        f"""<div class="card"><div class="title">本日の開催</div>
+        <div class="note">レース番号をタップ＝そのレースだけ予想。「最終Rを予想」＝従来どおり。「全レース一括予想」＝発売中レースをまとめて判定します。</div>
+        {blocks}</div>""",
         "本日の開催"
+    )
+
+
+@app.get("/course-batch")
+def course_batch():
+    course = request.args.get("course", "").strip()
+    mode = request.args.get("mode", "バランス").strip() or "バランス"
+    if mode not in ("堅め", "バランス", "穴狙い"):
+        mode = "バランス"
+
+    if course not in NAR_COURSE_CODES:
+        return page('<div class="bad">競馬場を選択してください。</div>', "全レース一括予想")
+
+    try:
+        races = race_numbers(course)
+    except Exception as exc:
+        return page(
+            f'<div class="bad">開催レース取得エラー：{html.escape(type(exc).__name__)} - {html.escape(str(exc))}</div>',
+            "全レース一括予想"
+        )
+
+    if not races:
+        return page(f'<div class="note">{html.escape(course)}の本日のレースを取得できませんでした。</div>', "全レース一括予想")
+
+    remaining = summary()["remaining"]
+
+    def worker(race_no):
+        try:
+            wide_data = nar_get_wide_odds(course, race_no)
+            horse_data = nar_get_horse_market(course, race_no)
+            if not wide_data:
+                return race_no, "skip", "ワイド未発売・取得不可", None
+            if not horse_data:
+                return race_no, "skip", "単勝・複勝未発売・取得不可", None
+            return race_no, "ok", "", evaluate_race_rank(horse_data, wide_data, mode, remaining)
+        except Exception as exc:
+            return race_no, "error", f"{type(exc).__name__}: {exc}", None
+
+    fetched = {}
+    with ThreadPoolExecutor(max_workers=min(4, max(1, len(races)))) as pool:
+        futures = [pool.submit(worker, r) for r in races]
+        for f in as_completed(futures):
+            race_no, status, message, result = f.result()
+            fetched[race_no] = (status, message, result)
+
+    cards = ""
+    analyzed = 0
+    good = 0
+
+    for race_no in races:
+        status, message, result = fetched.get(race_no, ("error", "取得できませんでした", None))
+        detail_url = html.escape(url_for("analyze", course=course, race=race_no, mode=mode, auto=1), quote=True)
+
+        if status != "ok" or not result:
+            cards += f"""<div class="batch-card">
+              <div class="batch-top"><div class="batch-race">{race_no}R</div><span class="batch-grade">－</span></div>
+              <div class="batch-meta">{html.escape(message)}</div>
+              <a class="btn secondary" href="{detail_url}">このレースを確認</a>
+            </div>"""
+            continue
+
+        analyzed += 1
+        grade = result["grade"]
+        if grade in ("S+", "S", "S-", "A"):
+            good += 1
+            save_pick(course, race_no, mode, result)
+
+        recs = result["recommendations"][:3]
+        picks = "<br>".join(
+            f'{i}位 <strong>{html.escape(x["combo"])}</strong> {html.escape(x["display"])}倍'
+            for i, x in enumerate(recs, 1)
+        ) or "3点候補なし"
+
+        cards += f"""<div class="batch-card {'good' if grade in ('S+','S','S-','A') else ''}">
+          <div class="batch-top"><div class="batch-race">{race_no}R</div><span class="batch-grade">{html.escape(grade)}</span></div>
+          <div class="batch-meta">参考スコア {int(result["score"])} / {html.escape(mode)}モード</div>
+          <div class="batch-picks">{picks}</div>
+          <a class="btn {'green' if grade in ('S+','S','S-','A') else 'secondary'}" href="{detail_url}">詳しい予想・購入額を見る</a>
+        </div>"""
+
+    return page(
+        f"""<div class="card">
+          <div class="title">{html.escape(course)} 全レース一括予想</div>
+          <div class="summary-strip">
+            <div><span>開催レース</span><strong>{len(races)}</strong></div>
+            <div><span>分析できたレース</span><strong>{analyzed}</strong></div>
+            <div><span>S/A系候補</span><strong>{good}</strong></div>
+          </div>
+          <div class="note">発売前などでオッズを取得できないレースは自動でスキップします。購入額や想定損益は各レースの詳細画面で確認してください。</div>
+          <div class="batch-grid">{cards}</div>
+        </div>""",
+        f"{course} 全レース一括予想"
     )
 
 
