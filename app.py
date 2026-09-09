@@ -6,7 +6,7 @@
 - NAR公式サイトから当日のワイドオッズ・単勝/複勝データを取得
 - PC版v44のルールをベースに「堅め / バランス / 穴狙い」の3点候補を算出
 - レース参考ランク（S+/S/S-/A/B/見送り）
-- 3点候補を画面上で確認
+- 3点候補をホーム画面へ自動入力
 - 条件の良いレースを「今日の勝負レース」に保存
 - 購入記録・的中/ハズレ・払戻・収支管理
 - SPAT4は公式サイトを開き、最終投票は利用者自身が行う
@@ -1814,6 +1814,11 @@ def analyze():
       <div class="pick-cards">{rec_cards or '<div class="note">候補を3点作れませんでした。</div>'}</div>
       {(('<div class="ok">' + html.escape(allocation["note"]) + '</div>') if allocation.get("all_positive") and allocation.get("note") else '')}
       {(('<div class="note">' + html.escape(allocation["note"]) + '</div>') if (not allocation.get("all_positive")) and allocation.get("note") and recs else '')}
+      {"<form method='post' action='/apply_recommendations'>" + hidden +
+       f"<input type='hidden' name='course' value='{html.escape(course)}'>"
+       f"<input type='hidden' name='race' value='{race}R'>"
+       f"<input type='hidden' name='mode' value='{html.escape(mode)}'>"
+       "<button class='green'>この3点をホームへ入力</button></form>" if recs else ""}
     </div>
 
     <div class="card">
