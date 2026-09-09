@@ -1814,11 +1814,6 @@ def analyze():
       <div class="pick-cards">{rec_cards or '<div class="note">候補を3点作れませんでした。</div>'}</div>
       {(('<div class="ok">' + html.escape(allocation["note"]) + '</div>') if allocation.get("all_positive") and allocation.get("note") else '')}
       {(('<div class="note">' + html.escape(allocation["note"]) + '</div>') if (not allocation.get("all_positive")) and allocation.get("note") and recs else '')}
-      {"<form method='post' action='/apply_recommendations'>" + hidden +
-       f"<input type='hidden' name='course' value='{html.escape(course)}'>"
-       f"<input type='hidden' name='race' value='{race}R'>"
-       f"<input type='hidden' name='mode' value='{html.escape(mode)}'>"
-       "<button class='green'></button></form>" if recs else ""}
     </div>
 
     <div class="card">
