@@ -1009,19 +1009,25 @@ table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:8px 5px;b
 
 
 
-/* ===== v47.5 3点候補スマホカード表示 ===== */
-.mobile-picks{display:none}
+/* ===== 3点候補：PC/スマホ共通カード表示 ===== */
+.pick-cards{
+  display:grid;
+  grid-template-columns:repeat(3,minmax(0,1fr));
+  gap:12px;
+}
+.pick-card{
+  border:1px solid #d7e2ee;
+  border-radius:18px;
+  padding:14px;
+  background:#fff;
+  min-width:0;
+}
+.pick-rank-one{
+  border-width:2px;
+  box-shadow:0 0 0 2px rgba(22,119,255,.06);
+}
 @media(max-width:760px){
-  .desktop-picks{display:none!important}
-  .mobile-picks{display:block}
-  .pick-card{
-    border:1px solid #d7e2ee;
-    border-radius:18px;
-    padding:14px;
-    margin:0 0 12px;
-    background:#fff
-  }
-  .pick-rank-one{border-width:2px;box-shadow:0 0 0 2px rgba(22,119,255,.06)}
+  .pick-cards{grid-template-columns:1fr}
   .pick-rank{
     font-size:14px;
     font-weight:800;
@@ -1071,6 +1077,11 @@ table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:8px 5px;b
   }
 }
 
+
+@media(min-width:761px){
+  .pick-grid{grid-template-columns:1fr}
+  .pick-combo{font-size:30px}
+}
 
 /* ===== v47.8 最低利益必要額自動計算 ===== */
 .summary-strip{
@@ -1650,11 +1661,7 @@ def analyze():
 
     <div class="card">
       <div class="title">3点候補</div>
-      <div class="desktop-picks scroll"><table>
-      <tr><th>順位</th><th>ワイド</th><th>オッズ</th><th>候補評価</th><th>優先度</th><th>参考EV</th><th>推奨額</th></tr>
-      {rec_rows or '<tr><td colspan="7">候補を3点作れませんでした。</td></tr>'}
-      </table></div>
-      <div class="mobile-picks">{rec_cards or '<div class="note">候補を3点作れませんでした。</div>'}</div>
+      <div class="pick-cards">{rec_cards or '<div class="note">候補を3点作れませんでした。</div>'}</div>
       {(('<div class="ok">' + html.escape(allocation["note"]) + '</div>') if allocation.get("all_positive") and allocation.get("note") else '')}
       {(('<div class="note">' + html.escape(allocation["note"]) + '</div>') if (not allocation.get("all_positive")) and allocation.get("note") and recs else '')}
       {"<form method='post' action='/apply_recommendations'>" + hidden +
