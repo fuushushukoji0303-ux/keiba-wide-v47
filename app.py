@@ -1472,6 +1472,46 @@ table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:8px 5px;b
 @media(max-width:760px){.course-head{align-items:stretch}.course-head .course-actions{width:100%}.course-actions .btn{flex:1;text-align:center}.race-chip{min-width:48px;flex:1 0 48px}.batch-grid{grid-template-columns:1fr}}
 
 
+
+/* ===== スマホ成績履歴：買い目を見やすく ===== */
+.history-bets{
+  display:flex;
+  flex-wrap:wrap;
+  gap:8px;
+  margin:10px 0 12px;
+}
+.history-bet-chip{
+  display:inline-flex;
+  align-items:center;
+  gap:6px;
+  padding:9px 12px;
+  border-radius:999px;
+  background:#fff;
+  border:1px solid #dce4ee;
+  font-weight:800;
+  line-height:1.25;
+}
+.history-bet-chip .combo{
+  font-size:18px;
+  font-weight:900;
+}
+.history-bet-chip .meta{
+  font-size:13px;
+  color:#68778c;
+  font-weight:700;
+}
+.delete-form{margin-top:10px}
+.delete-btn{
+  width:100%;
+  border:none;
+  border-radius:12px;
+  padding:12px 14px;
+  background:#eef1f5;
+  color:#8a2d2d;
+  font-weight:900;
+}
+
+
 /* ===== v48.1 会員ログイン ===== */
 .member-status{
   margin:8px 0 12px;
@@ -1903,6 +1943,34 @@ def picks():
 
 @app.get("/history")
 def history():
+
+    def history_bet_chips(row):
+        raw = str(row["bet_text"] if "bet_text" in row.keys() else "")
+        if not raw:
+            # 既存DB列から再構成
+            parts = []
+            for i in range(1, 4):
+                combo = row[f"wide{i}"] if f"wide{i}" in row.keys() else ""
+                odds = row[f"odds{i}"] if f"odds{i}" in row.keys() else ""
+                amount = row[f"amount{i}"] if f"amount{i}" in row.keys() else ""
+                if combo:
+                    parts.append(f"{combo} {amount}円 @{odds}")
+        else:
+            parts = raw.split(" / ")
+        chips = ""
+        for part in parts:
+            tokens = part.split(" ", 1)
+            combo = tokens[0]
+            meta = tokens[1] if len(tokens) > 1 else ""
+            chips += (
+                f'<span class="history-bet-chip">'
+                f'<span class="combo">{html.escape(combo)}</span>'
+                f'<span class="meta">{html.escape(meta)}</span>'
+                f'</span>'
+            )
+        return f'<div class="history-bets">{chips}</div>'
+
+
     msg = request.args.get("msg", "")
     with db() as con:
         rows = con.execute(
@@ -2135,6 +2203,13 @@ def analytics():
         + '<div class="note">回収率や的中率は確定済みの購入記録だけを集計します。データ件数が少ない段階では参考値としてご覧ください。</div>'
     )
     return page(body, "成績分析")
+
+
+@app.post("/history/delete/<int:pid>")
+def delete_history(pid):
+    with db() as con:
+        con.execute("DELETE FROM purchases WHERE id=?", (pid,))
+    return redirect(url_for("history", msg="履歴を1件削除しました。"))
 
 
 @app.post("/result/<int:pid>")
