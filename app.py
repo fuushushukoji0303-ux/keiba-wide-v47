@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-地方競馬ワイド投票管理 v50.2 - NAR結果自動照合版
+地方競馬ワイド投票管理 v50.2.1 - NAR結果取得修正版
 
 主な追加:
 - NAR公式サイトから当日のワイドオッズ・単勝/複勝データを取得
@@ -378,33 +378,40 @@ def normalize_wide_combo(combo):
 
 
 def nar_refund_url(course_name, race_no, race_date):
-    """指定日のNAR公式払戻ページURLを作る。"""
+    """指定した1レースだけを返すNAR公式スマホ版払戻ページURLを作る。"""
     date_text = str(race_date or "").strip().replace("-", "/")
     params = urllib.parse.urlencode({
         "k_babaCode": NAR_COURSE_CODES[course_name],
         "k_raceDate": date_text,
         "k_raceNo": int(race_no),
     })
-    return f"{NAR_BASE_URL}/RefundMoneyList?{params}"
+    return (
+        "https://sp.keiba.go.jp/KeibaWebSP/TodayRaceInfo/"
+        f"S_RefundMoneyList?{params}"
+    )
 
 
 def parse_nar_wide_refunds(text):
     """
-    NAR公式払戻ページからワイドの組番と100円あたり払戻金を抽出する。
-    例: {"1-9": 300, "2-9": 700, "1-2": 3160}
+    NAR公式の1レース払戻ページからワイド3組と
+    100円あたり払戻金を抽出する。
     """
     if not text:
         return {}
 
-    # HTMLタグを落として、ワイド～三連複の区間だけを見る。
-    plain = re.sub(r"<script\\b[^>]*>.*?</script>", " ", text, flags=re.I | re.S)
-    plain = re.sub(r"<style\\b[^>]*>.*?</style>", " ", plain, flags=re.I | re.S)
+    import html as _html
+    plain = _html.unescape(text)
+    plain = re.sub(r"<script\b[^>]*>.*?</script>", " ", plain, flags=re.I | re.S)
+    plain = re.sub(r"<style\b[^>]*>.*?</style>", " ", plain, flags=re.I | re.S)
+    plain = re.sub(r"<br\s*/?>", "\n", plain, flags=re.I)
+    plain = re.sub(r"</(?:td|th|tr|div|p|li)>", "\n", plain, flags=re.I)
     plain = re.sub(r"<[^>]+>", " ", plain)
-    plain = plain.replace("&nbsp;", " ").replace("&#165;", "円")
-    plain = re.sub(r"\\s+", " ", plain)
+    plain = plain.replace("\u3000", " ")
+    plain = re.sub(r"[ \t\r\f\v]+", " ", plain)
 
+    # ワイドから三連複までを対象にする。
     m = re.search(
-        r"ワイド\\s+(.*?)(?=三連複|三連単|重勝|返還|特払|$)",
+        r"ワイド\s*(.*?)(?=三連複|三連単|$)",
         plain,
         flags=re.S,
     )
@@ -412,25 +419,26 @@ def parse_nar_wide_refunds(text):
         return {}
 
     segment = m.group(1)
-    combos = [
-        normalize_wide_combo(f"{a}-{b}")
-        for a, b in re.findall(
-            r"(?<!\\d)(\\d{1,2})\\s*[-－ー―]\\s*(\\d{1,2})(?!\\d)",
-            segment,
-        )
-    ]
+
+    combos = []
+    for a, b in re.findall(
+        r"(?<!\d)(\d{1,2})\s*[-－ー―]\s*(\d{1,2})(?!\d)",
+        segment,
+    ):
+        combo = normalize_wide_combo(f"{a}-{b}")
+        if combo and combo not in combos:
+            combos.append(combo)
+
     payouts = [
         int(x.replace(",", ""))
-        for x in re.findall(r"([\\d,]+)\\s*円", segment)
+        for x in re.findall(r"([\d,]+)\s*円", segment)
     ]
 
-    # 通常ワイドは3組。余分な数字は使わず、対応できる分だけ採用。
+    # 通常のワイドは3組。順番どおり対応させる。
     result = {}
-    for combo, payout in zip(combos, payouts):
-        if combo and payout > 0:
+    for combo, payout in zip(combos[:3], payouts[:3]):
+        if payout > 0:
             result[combo] = payout
-        if len(result) >= 3:
-            break
     return result
 
 
