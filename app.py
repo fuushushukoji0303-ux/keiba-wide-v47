@@ -422,10 +422,34 @@ def _record_stats(text, label):
 
 def nar_get_form_data(course_name, race_no):
     """
-    NAR公式の出馬表(DebaTable)から、近走着順・当該競馬場成績・距離成績を取得。
+    NAR公式のPC版出馬表(DebaTable)から、近走着順・当該競馬場成績・距離成績を取得。
+    通常のnar_fetchはiPhone User-Agentなので、出馬表だけPC向けUAで取得する。
     取得できない場合は空dictを返し、既存の予想ロジックには影響させない。
     """
-    text = nar_fetch(nar_url("DebaTable", course_name, race_no))
+    url = nar_url("DebaTable", course_name, race_no)
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/140.0.0.0 Safari/537.36"
+            ),
+            "Accept-Language": "ja-JP,ja;q=0.9",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=15) as res:
+        raw = res.read()
+
+    text = None
+    for enc in ("utf-8", "cp932", "shift_jis"):
+        try:
+            text = raw.decode(enc)
+            break
+        except UnicodeDecodeError:
+            pass
+    if text is None:
+        text = raw.decode("utf-8", errors="replace")
     parser = SimpleTableParser()
     parser.feed(text)
     result = {}
@@ -442,7 +466,7 @@ def nar_get_form_data(course_name, race_no):
 
         horse_no = None
         # NAR出馬表では通常 row[1] が馬番。崩れた場合に備えて先頭3セルも確認。
-        for pos in (1, 0, 2):
+        for pos in (1, 0, 2, 3):
             if pos < len(cells):
                 s = cells[pos].replace(" ", "")
                 if re.fullmatch(r"\d{1,2}", s):
