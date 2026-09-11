@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-地方競馬ワイド投票管理 v49.5 - 騎手成績取得確認版
+地方競馬ワイド投票管理 v49.5.1 - 騎手成績取得修正版
 
 主な追加:
 - NAR公式サイトから当日のワイドオッズ・単勝/複勝データを取得
@@ -493,8 +493,8 @@ def nar_get_form_data(course_name, race_no, horses=None):
         jockey=""
         jockey_affiliation=""
         before_all=block.split(" 全 ",1)[0]
-        pairs=re.findall(r"([A-Za-zＡ-Ｚａ-ｚ一-龥々ヶヵァ-ヶー\\.．・]{2,16})\\s*[（(]([^）)]+)[）)]",before_all)
-        for person,aff in reversed(pairs):
+        pairs=re.findall(r"([A-Za-zＡ-Ｚａ-ｚ一-龥々ヶヵァ-ヶー.．・]{2,16})\s*[（(]([^）)]+)[）)]",before_all)
+        for person,aff in pairs:
             aff=str(aff).strip()
             if aff in JOCKEY_CODES:
                 jockey=_jname(person); jockey_affiliation=aff; break
@@ -633,8 +633,19 @@ def attach_jockey_stats(fd):
         name=_jname(f.get("jockey")); aff=str(f.get("jockey_affiliation") or "").strip()
         f["jockey"]=name; f["jockey_stats"]=None
         if name and aff:
-            try:f["jockey_stats"]=nar_get_jockey_leading(aff).get(name)
-            except Exception:pass
+            try:
+                leading=nar_get_jockey_leading(aff)
+                stat=leading.get(name)
+                if stat is None:
+                    candidates=[
+                        v for k,v in leading.items()
+                        if k.startswith(name) or name.startswith(k)
+                    ]
+                    if len(candidates)==1:
+                        stat=candidates[0]
+                f["jockey_stats"]=stat
+            except Exception:
+                pass
     return fd
 
 def form_data_panel(horses, form_data):
