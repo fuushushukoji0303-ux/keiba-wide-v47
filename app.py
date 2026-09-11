@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-地方競馬ワイド投票管理 v49.8 - 展開ペース予測確認版
+地方競馬ワイド投票管理 v49.9 - 脚質展開控えめ反映版
 
 主な追加:
 - NAR公式サイトから当日のワイドオッズ・単勝/複勝データを取得
@@ -716,6 +716,56 @@ def predict_race_pace(form_data):
     }
 
 
+
+def pace_fit_value(style, pace):
+    """
+    展開と脚質の相性を -1.0〜+1.0 で返す。
+    v49.9では最大±0.30点だけ候補スコアへ反映する。
+    """
+    if style not in ("逃げ", "先行", "差し", "追込"):
+        return 0.0
+
+    if pace == "ハイペース寄り":
+        return {
+            "逃げ": -0.80,
+            "先行": -0.35,
+            "差し": 1.00,
+            "追込": 0.75,
+        }.get(style, 0.0)
+
+    if pace == "スローペース寄り":
+        return {
+            "逃げ": 1.00,
+            "先行": 0.70,
+            "差し": -0.35,
+            "追込": -0.80,
+        }.get(style, 0.0)
+
+    # 平均ペース・判定不能はほぼ中立
+    if pace == "平均ペース":
+        return {
+            "逃げ": 0.10,
+            "先行": 0.20,
+            "差し": 0.10,
+            "追込": 0.00,
+        }.get(style, 0.0)
+
+    return 0.0
+
+
+def pace_fit_label(style, pace):
+    v = pace_fit_value(style, pace)
+    if v >= 0.75:
+        return "有利"
+    if v >= 0.25:
+        return "やや有利"
+    if v <= -0.75:
+        return "不利"
+    if v <= -0.25:
+        return "やや不利"
+    return "中立"
+
+
 def jockey_rating(form):
     """
     騎手の当年勝率・連対率を0〜100点へ換算。
@@ -869,6 +919,8 @@ def form_data_panel(horses, form_data):
         running_style=f.get("running_style") or "取得なし"
         style_conf=f.get("style_confidence") or 0.0
         style_text=(f"{running_style} ({style_conf:.0f}%)" if running_style!="取得なし" else "取得なし")
+        current_pace = predict_race_pace(form_data).get("pace", "判定不能")
+        pace_fit_text = pace_fit_label(running_style, current_pace) if running_style != "取得なし" else "取得なし"
 
         track = f.get("track")
         distance = f.get("distance")
@@ -892,7 +944,8 @@ def form_data_panel(horses, form_data):
             f"<td>{html.escape(quinella_text)}</td>"
             f"<td><strong>{html.escape(jockey_rating_text)}</strong></td>"
             f"<td>{html.escape(corner_text)}</td>"
-            f"<td><strong>{html.escape(style_text)}</strong></td></tr>"
+            f"<td><strong>{html.escape(style_text)}</strong></td>"
+            f"<td><strong>{html.escape(pace_fit_text)}</strong></td></tr>"
         )
 
     if not rows:
@@ -915,19 +968,19 @@ def form_data_panel(horses, form_data):
     return f"""
     <div class="card">
       <div class="title">精度アップ用データ取得状況</div>
-      <div class="ok">近走・競馬場適性・距離適性を {matched}頭分取得しました。騎手成績は予想へ控えめに反映しています。脚質と展開・ペース予測は取得確認中で、まだ予想順位には反映していません。</div>
+      <div class="ok">近走・競馬場適性・距離適性を {matched}頭分取得しました。騎手成績は予想へ控えめに反映しています。脚質と展開・ペース予測を、既存ロジックを主役にしたまま予想へ控えめに反映しています。</div>
 
       <div style="margin:12px 0;padding:12px 14px;border:1px solid #cfd8dc;border-radius:12px;background:#f8fbfc;">
-        <div style="font-weight:800;margin-bottom:5px;">展開・ペース予測（確認中）</div>
+        <div style="font-weight:800;margin-bottom:5px;">展開・ペース予測</div>
         <div style="font-size:1.08em;"><strong>{pace_name}</strong></div>
         <div style="margin-top:4px;">{pace_counts}</div>
         <div style="margin-top:4px;">{pace_comment}</div>
-        <div style="margin-top:5px;font-size:0.85em;">※ v49.8では表示確認のみ。まだ予想順位・買い目には反映していません。</div>
+        <div style="margin-top:5px;font-size:0.85em;">※ 脚質と展開の補正は最大±0.30点に抑えています。</div>
       </div>
 
       <div class="scroll">
         <table>
-          <tr><th>馬番</th><th>馬名</th><th>近5走着順</th><th>競馬場 複勝率</th><th>距離 複勝率</th><th>実績評価</th><th>騎手</th><th>騎手 勝率</th><th>騎手 連対率</th><th>騎手評価</th><th>過去走 通過順</th><th>脚質判定</th></tr>
+          <tr><th>馬番</th><th>馬名</th><th>近5走着順</th><th>競馬場 複勝率</th><th>距離 複勝率</th><th>実績評価</th><th>騎手</th><th>騎手 勝率</th><th>騎手 連対率</th><th>騎手評価</th><th>過去走 通過順</th><th>脚質判定</th><th>展開適性</th></tr>
           {rows}
         </table>
       </div>
@@ -946,6 +999,8 @@ def select_three_by_mode(horses, wide_data, mode, form_data=None):
         return []
 
     apply_form_ratings(horses, form_data)
+    pace_info = predict_race_pace(form_data)
+    race_pace = pace_info.get("pace", "判定不能")
     wide_map = {item["combo"]: item for item in wide_data}
     ranked = sorted(horses, key=lambda h: h["market_rank"])
     candidates = []
@@ -968,11 +1023,24 @@ def select_three_by_mode(horses, wide_data, mode, form_data=None):
             -0.35, min(0.35, (pair_jockey - 50.0) / 50.0 * 0.35)
         )
 
-        adjusted_score = score - form_adjust - jockey_adjust
+        # v49.9: 脚質×展開補正。最大±0.30点に抑える。
+        axis_form = (form_data or {}).get(int(axis.get("horse_no", 0)), {})
+        partner_form = (form_data or {}).get(int(partner.get("horse_no", 0)), {})
+        axis_style = axis_form.get("running_style", "取得なし")
+        partner_style = partner_form.get("running_style", "取得なし")
+        pair_pace_fit = (
+            pace_fit_value(axis_style, race_pace)
+            + pace_fit_value(partner_style, race_pace)
+        ) / 2.0
+        pace_adjust = max(-0.30, min(0.30, pair_pace_fit * 0.30))
+
+        adjusted_score = score - form_adjust - jockey_adjust - pace_adjust
         confidence = max(1, min(99, int(round(100 - adjusted_score * 5))))
         reason = (
             f"{reason}／実績評価 {pair_form:.1f}点"
             f"／騎手評価 {pair_jockey:.1f}点"
+            f"／展開 {race_pace}"
+            f"（{axis_style}×{partner_style}）"
         )
         candidates.append((adjusted_score, axis, partner, wide, confidence, reason))
 
