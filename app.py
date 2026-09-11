@@ -397,6 +397,145 @@ def nar_get_horse_market(course_name, race_no):
     return horses
 
 
+
+def _record_stats(text, label):
+    """NAR出馬表の「場 4-9-13-101」「距 2-5-5-53」形式を解析。"""
+    normalized = str(text).replace("\xa0", " ")
+    m = re.search(
+        rf"{re.escape(label)}\s*(\d+)\s*-\s*(\d+)\s*-\s*(\d+)\s*-\s*(\d+)",
+        normalized,
+    )
+    if not m:
+        return None
+    wins, seconds, thirds, others = [int(x) for x in m.groups()]
+    total = wins + seconds + thirds + others
+    top3_rate = ((wins + seconds + thirds) / total * 100.0) if total else None
+    return {
+        "wins": wins,
+        "seconds": seconds,
+        "thirds": thirds,
+        "others": others,
+        "total": total,
+        "top3_rate": round(top3_rate, 1) if top3_rate is not None else None,
+    }
+
+
+def nar_get_form_data(course_name, race_no):
+    """
+    NAR公式の出馬表(DebaTable)から、近走着順・当該競馬場成績・距離成績を取得。
+    取得できない場合は空dictを返し、既存の予想ロジックには影響させない。
+    """
+    text = nar_fetch(nar_url("DebaTable", course_name, race_no))
+    parser = SimpleTableParser()
+    parser.feed(text)
+    result = {}
+
+    for row in parser.rows:
+        if not row:
+            continue
+        cells = [str(x).strip() for x in row]
+        joined = " ".join(cells).replace("\xa0", " ")
+
+        # 出走馬の行は「全」「場」「距」などの着別成績を含む
+        if "全" not in joined or ("場" not in joined and "距" not in joined):
+            continue
+
+        horse_no = None
+        # NAR出馬表では通常 row[1] が馬番。崩れた場合に備えて先頭3セルも確認。
+        for pos in (1, 0, 2):
+            if pos < len(cells):
+                s = cells[pos].replace(" ", "")
+                if re.fullmatch(r"\d{1,2}", s):
+                    n = int(s)
+                    if 1 <= n <= 16:
+                        horse_no = n
+                        break
+        if horse_no is None:
+            continue
+
+        track = _record_stats(joined, "場")
+        distance = _record_stats(joined, "距")
+
+        recent = []
+        # 前走～5走前のセルは「着順 日付 ...」で始まることが多い
+        for cell in cells:
+            m = re.match(r"^\s*(\d{1,2})\s+\d{2}\.\d{2}\.\d{2}\b", cell)
+            if m:
+                recent.append(int(m.group(1)))
+        recent = recent[:5]
+
+        result[horse_no] = {
+            "recent_finishes": recent,
+            "track": track,
+            "distance": distance,
+        }
+
+    return result
+
+
+def form_data_panel(horses, form_data):
+    """取得確認用。予想ロジックにはまだ反映しない。"""
+    if not form_data:
+        return (
+            '<div class="card"><div class="title">精度アップ用データ取得状況</div>'
+            '<div class="note">近走・競馬場適性・距離適性データは取得できませんでした。'
+            '現在の予想ロジックは従来どおり動作しています。</div></div>'
+        )
+
+    by_no = {int(h["horse_no"]): h for h in horses}
+    rows = ""
+    matched = 0
+
+    for horse_no in sorted(form_data):
+        if horse_no not in by_no:
+            continue
+        matched += 1
+        h = by_no[horse_no]
+        f = form_data[horse_no]
+
+        recent = f.get("recent_finishes") or []
+        recent_text = "・".join(str(x) for x in recent) if recent else "取得なし"
+
+        track = f.get("track")
+        distance = f.get("distance")
+        track_text = (
+            f'{track["top3_rate"]:.1f}% ({track["wins"]}-{track["seconds"]}-{track["thirds"]}-{track["others"]})'
+            if track and track.get("top3_rate") is not None else "取得なし"
+        )
+        distance_text = (
+            f'{distance["top3_rate"]:.1f}% ({distance["wins"]}-{distance["seconds"]}-{distance["thirds"]}-{distance["others"]})'
+            if distance and distance.get("top3_rate") is not None else "取得なし"
+        )
+
+        rows += (
+            f"<tr><td><strong>{horse_no}</strong></td>"
+            f"<td>{html.escape(str(h.get('horse_name','')))}</td>"
+            f"<td>{html.escape(recent_text)}</td>"
+            f"<td>{html.escape(track_text)}</td>"
+            f"<td>{html.escape(distance_text)}</td></tr>"
+        )
+
+    if not rows:
+        return (
+            '<div class="card"><div class="title">精度アップ用データ取得状況</div>'
+            '<div class="note">出馬表自体は取得できましたが、オッズ側の馬番と照合できませんでした。'
+            '従来ロジックは変更していません。</div></div>'
+        )
+
+    return f"""
+    <div class="card">
+      <div class="title">精度アップ用データ取得状況</div>
+      <div class="ok">近走・競馬場適性・距離適性を {matched}頭分取得しました。現在は確認段階で、まだ予想順位には反映していません。</div>
+      <div class="scroll">
+        <table>
+          <tr><th>馬番</th><th>馬名</th><th>近5走着順</th><th>競馬場 複勝率</th><th>距離 複勝率</th></tr>
+          {rows}
+        </table>
+      </div>
+    </div>
+    """
+
+
 def make_pair_key(a, b):
     first, second = sorted((int(a), int(b)))
     return f"{first}-{second}"
@@ -1795,6 +1934,12 @@ def analyze():
             "オッズ・3点予想"
         )
 
+    # v49 Step1: 近走・競馬場・距離適性の取得確認。失敗時も従来予想を継続。
+    try:
+        form_data = nar_get_form_data(course, race)
+    except Exception:
+        form_data = {}
+
     result = evaluate_race_rank(horse_data, wide_data, mode, summary()["remaining"])
     save_pick(course, race, mode, result)
     recs = result["recommendations"][:3]
@@ -1840,13 +1985,16 @@ def analyze():
         for x in wide_data[:50]
     )
 
+    form_panel = form_data_panel(horse_data, form_data)
+
     result_html = f"""
+    {form_panel}
     <div class="card">
       <div class="title">{html.escape(course)} {race}R　参考判定</div>
       <div class="grade">{html.escape(result["grade"])}</div>
       <div class="score">参考スコア {result["score"]} / 100</div>
       <ul>{reasons}</ul>
-      <div class="small">※これは的中確率ではありません。市場オッズを使ったルールベース評価です。</div>
+      <div class="small">※これは的中確率ではありません。現在の判定は従来どおり市場オッズ中心です。上の実績データは取得確認段階で、まだ順位には反映していません。</div>
     </div>
 
     <div class="card">
