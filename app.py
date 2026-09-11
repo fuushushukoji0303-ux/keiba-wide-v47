@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-地方競馬ワイド投票管理 v50.3.1 - スマホ表示改善版
+地方競馬ワイド投票管理 v50.4 - 発走5分前レース版
 
 主な追加:
 - NAR公式サイトから当日のワイドオッズ・単勝/複勝データを取得
@@ -366,6 +366,91 @@ def nar_url(page_name, course_name, race_no):
         "k_raceNo": int(race_no),
     })
     return f"{NAR_BASE_URL}/{page_name}?{params}"
+
+
+
+def nar_get_race_start_time(course_name, race_no):
+    """
+    NAR公式出馬表から発走予定時刻を取得。
+    戻り値: JSTのdatetime。取得できない場合はNone。
+    """
+    try:
+        text = nar_fetch(nar_url("DebaTable", course_name, race_no), timeout=12)
+    except Exception:
+        return None
+
+    import html as _html
+    plain = _html.unescape(text)
+    plain = re.sub(r"<script\b[^>]*>.*?</script>", " ", plain, flags=re.I | re.S)
+    plain = re.sub(r"<style\b[^>]*>.*?</style>", " ", plain, flags=re.I | re.S)
+    plain = re.sub(r"<[^>]+>", " ", plain)
+    plain = re.sub(r"\s+", " ", plain)
+
+    # NAR公式は「20:30発走」のように表示。
+    m = re.search(r"(?<!\d)([01]?\d|2[0-3]):([0-5]\d)\s*発走", plain)
+    if not m:
+        return None
+
+    hour = int(m.group(1))
+    minute = int(m.group(2))
+    n = now()
+    return n.replace(hour=hour, minute=minute, second=0, microsecond=0)
+
+
+def closing_soon_candidates(window_minutes=5):
+    """
+    本日開催されている全競馬場を横断し、
+    発走まで0～window_minutes分のレースを返す。
+    「締切5分前」はSPAT4の正式締切ではなく、NAR発走予定時刻基準の目安。
+    """
+    window_minutes = max(1, min(15, int(window_minutes or 5)))
+    current = now()
+
+    course_races = []
+    for course in NAR_COURSE_CODES:
+        try:
+            nums = race_numbers(course)
+        except Exception:
+            nums = []
+        for race_no in nums:
+            course_races.append((course, race_no))
+
+    if not course_races:
+        return [], []
+
+    # 発走時刻取得は並列化して待ち時間を抑える。
+    schedule = []
+    with ThreadPoolExecutor(max_workers=min(8, max(1, len(course_races)))) as pool:
+        future_map = {
+            pool.submit(nar_get_race_start_time, course, race_no): (course, race_no)
+            for course, race_no in course_races
+        }
+        for f in as_completed(future_map):
+            course, race_no = future_map[f]
+            try:
+                start_dt = f.result()
+            except Exception:
+                start_dt = None
+            if start_dt:
+                diff_seconds = (start_dt - current).total_seconds()
+                schedule.append({
+                    "course": course,
+                    "race": race_no,
+                    "start_dt": start_dt,
+                    "minutes": diff_seconds / 60.0,
+                })
+
+    schedule.sort(key=lambda x: x["start_dt"])
+
+    active = [
+        x for x in schedule
+        if 0 <= x["minutes"] <= window_minutes
+    ]
+    future = [
+        x for x in schedule
+        if x["minutes"] > window_minutes
+    ]
+    return active, future
 
 
 def race_numbers(course):
@@ -2811,6 +2896,65 @@ table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:8px 5px;b
 @media(max-width:760px){.course-head{align-items:stretch}.course-head .course-actions{width:100%}.course-actions .btn{flex:1;text-align:center}.race-chip{min-width:48px;flex:1 0 48px}.batch-grid{grid-template-columns:1fr}}
 
 
+/* ===== v50.4 発走5分前レース ===== */
+.closing-hero{
+  border:2px solid #79b99a;
+  background:#f1fbf5;
+  border-radius:18px;
+  padding:14px;
+  margin-bottom:14px
+}
+.closing-hero .big{
+  font-size:26px;
+  font-weight:900;
+  margin:3px 0 6px
+}
+.closing-race-card{
+  border:2px solid #79b99a;
+  border-radius:18px;
+  background:#fff;
+  padding:14px;
+  margin:12px 0
+}
+.closing-top{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:10px;
+  flex-wrap:wrap
+}
+.closing-race{
+  font-size:26px;
+  font-weight:900
+}
+.closing-countdown{
+  display:inline-flex;
+  align-items:center;
+  border-radius:999px;
+  padding:7px 11px;
+  background:#eaf8ef;
+  color:#17613a;
+  font-weight:900
+}
+.closing-picks{
+  margin:10px 0;
+  padding:10px;
+  border-radius:12px;
+  background:#f6f8fb;
+  line-height:1.8
+}
+.closing-actions{
+  display:flex;
+  gap:8px;
+  flex-wrap:wrap
+}
+.closing-actions .btn{flex:1;text-align:center}
+@media(max-width:760px){
+  .closing-race{font-size:23px}
+  .closing-actions{display:grid;grid-template-columns:1fr}
+}
+
+
 
 /* ===== スマホ成績履歴：買い目を見やすく ===== */
 .history-bets{
@@ -2888,6 +3032,7 @@ def page(body, title=APP_TITLE):
 <a class="btn secondary" href="/analytics">成績分析</a>
 <a class="btn secondary" href="/validation">予想検証</a>
 <a class="btn secondary" href="/courses">本日の開催</a>
+<a class="btn green" href="/closing-soon">発走5分前</a>
 </div>
 {('<div class="member-status">会員ログイン中：' + html.escape(str(session.get("member_id",""))) + '　<a href="/logout">ログアウト</a></div>') if LOGIN_ENABLED and session.get("member_authenticated") else ('<div class="member-status setup">販売前：会員ログイン未設定</div>' if not LOGIN_ENABLED else '')}
 {body}
@@ -3746,6 +3891,207 @@ def result(pid):
             (result_text, ret, pid),
         )
     return redirect(url_for("history", msg=f"{result_text}として更新しました。"))
+
+
+@app.get("/closing-soon")
+def closing_soon():
+    """
+    本日開催の全競馬場を横断し、NAR発走予定時刻まで5分以内のレースだけ
+    最新オッズで3点予想する時短画面。
+    """
+    mode = request.args.get("mode", "バランス").strip() or "バランス"
+    if mode not in ("堅め", "バランス", "穴狙い"):
+        mode = "バランス"
+
+    try:
+        active, future = closing_soon_candidates(5)
+    except Exception as exc:
+        return page(
+            f'<div class="bad">発走時刻の確認中にエラーが発生しました：'
+            f'{html.escape(type(exc).__name__)} - {html.escape(str(exc))}</div>',
+            "発走5分前レース"
+        )
+
+    now_text = now().strftime("%H:%M")
+    refresh_url = html.escape(url_for("closing_soon", mode=mode), quote=True)
+
+    if not active:
+        next_html = ""
+        if future:
+            nxt = future[0]
+            mins = max(0, int(round(nxt["minutes"])))
+            next_html = f"""
+            <div class="note">
+              次に近いレース：<strong>{html.escape(nxt["course"])} {int(nxt["race"])}R</strong>
+              ／ 発走予定 {nxt["start_dt"].strftime("%H:%M")}
+              ／ 約{mins}分後
+            </div>
+            """
+
+        return page(
+            f"""
+            <div class="card">
+              <div class="title">発走5分前レース</div>
+              <div class="closing-hero">
+                <div class="small">現在時刻 {now_text}</div>
+                <div class="big">今は5分以内の対象レースがありません</div>
+                <div>本日の全開催を横断して、発走予定時刻まで5分以内のレースだけを探します。</div>
+              </div>
+              {next_html}
+              <a class="btn green" href="{refresh_url}">今の時刻でもう一度確認</a>
+              <div class="note" style="margin-top:12px;">
+                ※「5分前」はNAR公式の発走予定時刻を基準にした目安です。
+                SPAT4等の正式な投票締切時刻そのものではありません。
+                実際の投票は余裕をもって行ってください。
+              </div>
+            </div>
+            """,
+            "発走5分前レース"
+        )
+
+    remaining = summary()["remaining"]
+
+    def predict_one(item):
+        course = item["course"]
+        race_no = item["race"]
+        try:
+            wide_data = nar_get_wide_odds(course, race_no)
+            horse_data = nar_get_horse_market(course, race_no)
+            if not wide_data:
+                return item, "skip", "ワイドオッズ未取得", None
+            if not horse_data:
+                return item, "skip", "単勝・複勝データ未取得", None
+
+            try:
+                form_data = nar_get_form_data(course, race_no, horse_data)
+                attach_jockey_stats(form_data)
+            except Exception:
+                form_data = {}
+
+            result = evaluate_race_rank(
+                horse_data, wide_data, mode, remaining, form_data
+            )
+            result["_validation_pace"] = predict_race_pace(form_data).get(
+                "pace", "判定不能"
+            )
+            result["_baseline_result"] = evaluate_race_rank_baseline(
+                horse_data, wide_data, mode, remaining
+            )
+            return item, "ok", "", result
+        except Exception as exc:
+            return item, "error", f"{type(exc).__name__}: {exc}", None
+
+    results = []
+    with ThreadPoolExecutor(max_workers=min(4, len(active))) as pool:
+        futures = [pool.submit(predict_one, item) for item in active]
+        for f in as_completed(futures):
+            results.append(f.result())
+
+    results.sort(key=lambda x: x[0]["start_dt"])
+    cards = ""
+
+    for item, status, message, result in results:
+        course = item["course"]
+        race_no = item["race"]
+        start_text = item["start_dt"].strftime("%H:%M")
+        seconds_left = max(
+            0, int((item["start_dt"] - now()).total_seconds())
+        )
+        min_left = seconds_left // 60
+        sec_left = seconds_left % 60
+        countdown = f"約{min_left}分{sec_left:02d}秒"
+
+        detail_url = html.escape(
+            url_for(
+                "analyze",
+                course=course,
+                race=race_no,
+                mode=mode,
+                auto=1,
+            ),
+            quote=True,
+        )
+
+        if status != "ok" or not result:
+            cards += f"""
+            <div class="closing-race-card">
+              <div class="closing-top">
+                <div class="closing-race">{html.escape(course)} {race_no}R</div>
+                <div class="closing-countdown">発走 {start_text} ／ {countdown}</div>
+              </div>
+              <div class="note">{html.escape(message)}</div>
+              <a class="btn secondary" href="{detail_url}">このレースを確認</a>
+            </div>
+            """
+            continue
+
+        # 検証記録も従来どおり初回固定保存
+        save_validation_prediction(
+            course, race_no, mode, result, remaining,
+            result.get("_validation_pace", "判定不能"),
+            result.get("_baseline_result") or {}
+        )
+        if result["grade"] in ("S+", "S", "S-", "A"):
+            save_pick(course, race_no, mode, result)
+
+        recs = result["recommendations"][:3]
+        allocation = allocate_amounts(
+            result["grade"], recs, remaining
+        )
+        amounts = list(allocation.get("amounts") or [])
+        amounts += [0] * (3 - len(amounts))
+
+        picks = ""
+        for i, rec in enumerate(recs):
+            amount_text = (
+                f" ／ 推奨 {int(amounts[i]):,}円"
+                if int(amounts[i] or 0) > 0 else ""
+            )
+            picks += (
+                f'{i+1}位 <strong>{html.escape(rec["combo"])}</strong> '
+                f'{html.escape(rec["display"])}倍{amount_text}<br>'
+            )
+        if not picks:
+            picks = "3点候補なし"
+
+        cards += f"""
+        <div class="closing-race-card">
+          <div class="closing-top">
+            <div class="closing-race">{html.escape(course)} {race_no}R</div>
+            <div class="closing-countdown">発走 {start_text} ／ {countdown}</div>
+          </div>
+          <div class="batch-meta">
+            グレード <strong>{html.escape(result["grade"])}</strong>
+            ／ 参考スコア {int(result["score"])}
+            ／ {html.escape(mode)}モード
+          </div>
+          <div class="closing-picks">{picks}</div>
+          <div class="closing-actions">
+            <a class="btn green" href="{detail_url}">詳しい予想・購入額を見る</a>
+            <a class="btn secondary" href="{refresh_url}">時刻を更新</a>
+          </div>
+        </div>
+        """
+
+    return page(
+        f"""
+        <div class="card">
+          <div class="title">発走5分前レース</div>
+          <div class="closing-hero">
+            <div class="small">現在時刻 {now_text}</div>
+            <div class="big">{len(active)}レースが5分以内です</div>
+            <div>本日の全開催から、今すぐ確認したいレースだけを抽出しました。</div>
+          </div>
+          {cards}
+          <div class="note">
+            ※NAR公式の発走予定時刻を基準にしています。
+            実際の投票締切は投票サービス側で異なる場合があります。
+            表示後もオッズは変動するため、購入直前に最終確認してください。
+          </div>
+        </div>
+        """,
+        "発走5分前レース"
+    )
 
 
 @app.get("/courses")
