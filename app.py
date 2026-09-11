@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-地方競馬ワイド投票管理 v49.7 - 脚質データ取得確認版
+地方競馬ワイド投票管理 v49.7.1 - 脚質通過順取得修正版
 
 主な追加:
 - NAR公式サイトから当日のワイドオッズ・単勝/複勝データを取得
@@ -589,34 +589,33 @@ def horse_form_rating(form):
 
 def _extract_corner_histories(block):
     """
-    NAR出馬表の過去走部分からコーナー通過順を最大5走ぶん抽出。
-    例: 1-1 / 2-2-3 / 8-7-5-4
-    着別成績（4-4-6-33等）や日付は除外する。
+    NAR出馬表の過去走からコーナー通過順を最大5走ぶん抽出。
+    通過順は通常「1-1-1-1 42.1」のように上がり3Fの直前に出るため、
+    着別成績（2-2-3-17等）と混同しないよう、その位置関係で判定する。
     """
     if not block:
         return []
 
-    # 「場」「距」など通算成績より後ろは対象外にする。
-    past = block
-    cut_positions = []
-    for marker in (" 全 ", " 左 ", " 右 ", " 場 ", " 距 "):
-        p = past.find(marker)
-        if p >= 0:
-            cut_positions.append(p)
-    if cut_positions:
-        past = past[:min(cut_positions)]
+    normalized = re.sub(r"[\u3000\t\r\n]+", " ", str(block))
+    normalized = re.sub(r"\s+", " ", normalized)
 
-    # 2〜4個の小さな整数で構成される通過順だけを候補にする。
-    # 日付 2026-09-11、成績 4-4-6-33、タイム等は除外。
-    raw = re.findall(r"(?<![\d.])(\d{1,2}(?:\s*-\s*\d{1,2}){1,3})(?![\d.])", past)
+    # 例:
+    # 1:45.8  1-1-1-1  42.1
+    # 1:08.2  6-6        37.0
+    # 「通過順の直後に上がり3F」がある並びだけを採用する。
+    matches = re.findall(
+        r"(?<![\d.-])(\d{1,2}(?:\s*-\s*\d{1,2}){1,3})"
+        r"\s+(?=\d{2}\.\d\b)",
+        normalized,
+    )
+
     out = []
-    for s in raw:
+    for s in matches:
         nums = [int(x) for x in re.findall(r"\d+", s)]
         if not (2 <= len(nums) <= 4):
             continue
         if any(n <= 0 or n > 18 for n in nums):
             continue
-        # 同じ候補の連続重複を避ける
         if not out or out[-1] != nums:
             out.append(nums)
         if len(out) >= 5:
