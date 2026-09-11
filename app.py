@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-地方競馬ワイド投票管理 v50.0.1 - 展開予測詳細修正版
+地方競馬ワイド投票管理 v50.1 - 予想検証自動記録版
 
 主な追加:
 - NAR公式サイトから当日のワイドオッズ・単勝/複勝データを取得
@@ -131,6 +131,35 @@ def init_db():
             con.execute("ALTER TABLE picks ADD COLUMN locked INTEGER NOT NULL DEFAULT 0")
         if "locked_at" not in pick_cols:
             con.execute("ALTER TABLE picks ADD COLUMN locked_at TEXT DEFAULT ''")
+
+
+        # v50.1: 予想検証ログ
+        con.execute("""
+        CREATE TABLE IF NOT EXISTS validation_predictions(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            race_date TEXT NOT NULL,
+            recorded_at TEXT NOT NULL,
+            course TEXT NOT NULL,
+            race TEXT NOT NULL,
+            mode TEXT NOT NULL,
+            grade TEXT NOT NULL,
+            score INTEGER NOT NULL,
+            pace TEXT NOT NULL DEFAULT '',
+            candidate1 TEXT DEFAULT '',
+            candidate2 TEXT DEFAULT '',
+            candidate3 TEXT DEFAULT '',
+            odds1 REAL NOT NULL DEFAULT 0,
+            odds2 REAL NOT NULL DEFAULT 0,
+            odds3 REAL NOT NULL DEFAULT 0,
+            amount1 INTEGER NOT NULL DEFAULT 0,
+            amount2 INTEGER NOT NULL DEFAULT 0,
+            amount3 INTEGER NOT NULL DEFAULT 0,
+            total_bet INTEGER NOT NULL DEFAULT 0,
+            result TEXT NOT NULL DEFAULT '未確定',
+            return_amount INTEGER NOT NULL DEFAULT 0,
+            UNIQUE(race_date, course, race, mode)
+        )
+        """)
 
 
 
@@ -1555,6 +1584,51 @@ def save_pick(course, race, mode, result):
         ))
 
 
+def save_validation_prediction(course, race, mode, result, remaining_budget, pace=""):
+    """
+    予想を最初に出した時点の内容で固定保存する。
+    同じ日・競馬場・R・モードを再予想しても上書きしない。
+    """
+    recs = list((result or {}).get("recommendations") or [])[:3]
+    recs += [{}] * (3 - len(recs))
+
+    allocation = allocate_amounts(
+        (result or {}).get("grade", ""),
+        [x for x in recs if x],
+        remaining_budget,
+    )
+    amounts = list(allocation.get("amounts") or [])
+    amounts += [0] * (3 - len(amounts))
+
+    combos = [str((x or {}).get("combo") or "") for x in recs]
+    odds = [float((x or {}).get("low") or 0.0) for x in recs]
+    total_bet = sum(int(x or 0) for x in amounts[:3])
+
+    with db() as con:
+        con.execute("""
+        INSERT INTO validation_predictions(
+            race_date,recorded_at,course,race,mode,grade,score,pace,
+            candidate1,candidate2,candidate3,
+            odds1,odds2,odds3,
+            amount1,amount2,amount3,total_bet
+        )
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(race_date,course,race,mode) DO NOTHING
+        """, (
+            today(), now().strftime("%Y-%m-%d %H:%M:%S"),
+            course, f"{race}R", mode,
+            str((result or {}).get("grade") or ""),
+            int((result or {}).get("score") or 0),
+            str(pace or ""),
+            combos[0], combos[1], combos[2],
+            odds[0], odds[1], odds[2],
+            int(amounts[0] or 0), int(amounts[1] or 0), int(amounts[2] or 0),
+            total_bet,
+        ))
+
+
+
+
 CSS = """
 :root{--bg:#f3f6fa;--card:#fff;--ink:#17202d;--muted:#68778c;--line:#dce4ee;--blue:#1677ff;--green:#16834f;--red:#b42318;--gold:#a56500}
 *{box-sizing:border-box}
@@ -2257,6 +2331,7 @@ def page(body, title=APP_TITLE):
 <a class="btn secondary" href="/picks">勝負レース</a>
 <a class="btn secondary" href="/history">成績履歴</a>
 <a class="btn secondary" href="/analytics">成績分析</a>
+<a class="btn secondary" href="/validation">予想検証</a>
 <a class="btn secondary" href="/courses">本日の開催</a>
 </div>
 {('<div class="member-status">会員ログイン中：' + html.escape(str(session.get("member_id",""))) + '　<a href="/logout">ログアウト</a></div>') if LOGIN_ENABLED and session.get("member_authenticated") else ('<div class="member-status setup">販売前：会員ログイン未設定</div>' if not LOGIN_ENABLED else '')}
@@ -2512,7 +2587,10 @@ def analyze():
     except Exception:
         form_data = {}
 
-    result = evaluate_race_rank(horse_data, wide_data, mode, summary()["remaining"], form_data)
+    remaining_budget = summary()["remaining"]
+    result = evaluate_race_rank(horse_data, wide_data, mode, remaining_budget, form_data)
+    pace_now = predict_race_pace(form_data).get("pace", "判定不能")
+    save_validation_prediction(course, race, mode, result, remaining_budget, pace_now)
     save_pick(course, race, mode, result)
     recs = result["recommendations"][:3]
     allocation = allocate_amounts(result["grade"], recs, summary()["remaining"])
@@ -3192,9 +3270,11 @@ def course_batch():
                 attach_jockey_stats(form_data)
             except Exception:
                 form_data = {}
-            return race_no, "ok", "", evaluate_race_rank(
+            result = evaluate_race_rank(
                 horse_data, wide_data, mode, remaining, form_data
             )
+            result["_validation_pace"] = predict_race_pace(form_data).get("pace", "判定不能")
+            return race_no, "ok", "", result
         except Exception as exc:
             return race_no, "error", f"{type(exc).__name__}: {exc}", None
 
@@ -3223,6 +3303,13 @@ def course_batch():
 
         analyzed += 1
         grade = result["grade"]
+
+        # v50.1: B/見送りを含め、分析できた全レースを検証用に初回固定保存
+        save_validation_prediction(
+            course, race_no, mode, result, remaining,
+            result.get("_validation_pace", "判定不能")
+        )
+
         if grade in ("S+", "S", "S-", "A"):
             good += 1
             save_pick(course, race_no, mode, result)
@@ -3253,6 +3340,131 @@ def course_batch():
         </div>""",
         f"{course} 全レース一括予想"
     )
+
+
+@app.get("/validation")
+def validation():
+    with db() as con:
+        rows = con.execute(
+            "SELECT * FROM validation_predictions ORDER BY race_date DESC,id DESC"
+        ).fetchall()
+
+    total = len(rows)
+    settled = [r for r in rows if r["result"] in ("的中", "ハズレ")]
+    hits = sum(1 for r in settled if r["result"] == "的中")
+    hit_rate = (hits / len(settled) * 100.0) if settled else 0.0
+
+    bet_rows = [r for r in settled if int(r["total_bet"] or 0) > 0]
+    total_bet = sum(int(r["total_bet"] or 0) for r in bet_rows)
+    total_return = sum(int(r["return_amount"] or 0) for r in bet_rows)
+    recovery = (total_return / total_bet * 100.0) if total_bet else 0.0
+    profit = total_return - total_bet
+
+    # グレード別の確定成績
+    grade_order = ["S+", "S", "S-", "A", "B", "見送り"]
+    grade_rows = ""
+    for grade in grade_order:
+        gs = [r for r in settled if r["grade"] == grade]
+        if not gs:
+            continue
+        ghits = sum(1 for r in gs if r["result"] == "的中")
+        ghr = ghits / len(gs) * 100.0 if gs else 0.0
+        gb = sum(int(r["total_bet"] or 0) for r in gs)
+        gr = sum(int(r["return_amount"] or 0) for r in gs)
+        groi = gr / gb * 100.0 if gb else 0.0
+        grade_rows += (
+            f"<tr><td><strong>{html.escape(grade)}</strong></td>"
+            f"<td>{len(gs)}件</td><td>{ghits}件</td><td>{ghr:.1f}%</td>"
+            f"<td>{groi:.1f}%</td><td>{gr-gb:+,}円</td></tr>"
+        )
+
+    cards = ""
+    for r in rows[:200]:
+        picks = []
+        for i in range(1, 4):
+            combo = str(r[f"candidate{i}"] or "")
+            if not combo:
+                continue
+            odds = float(r[f"odds{i}"] or 0)
+            amount = int(r[f"amount{i}"] or 0)
+            odds_text = f"{odds:.1f}倍" if odds else "オッズなし"
+            amount_text = f" / {amount:,}円" if amount else ""
+            picks.append(f"{i}位 {html.escape(combo)} {odds_text}{amount_text}")
+        pick_html = "<br>".join(picks) or "候補なし"
+
+        status_class = "ok" if r["result"] == "的中" else ("bad" if r["result"] == "ハズレ" else "note")
+        return_text = f'{int(r["return_amount"] or 0):,}円' if r["result"] == "的中" else ("0円" if r["result"] == "ハズレ" else "未確定")
+
+        cards += f"""
+        <div class="card">
+          <div class="title">{html.escape(r["race_date"])}　{html.escape(r["course"])} {html.escape(r["race"])}</div>
+          <div class="small">記録 {html.escape(r["recorded_at"])} ／ {html.escape(r["mode"])} ／ グレード {html.escape(r["grade"])} ／ スコア {int(r["score"])} ／ 展開 {html.escape(r["pace"] or "不明")}</div>
+          <div style="margin:10px 0;line-height:1.8;">{pick_html}</div>
+          <div class="{status_class}">結果：{html.escape(r["result"])} ／ 払戻：{return_text} ／ 検証購入額：{int(r["total_bet"] or 0):,}円</div>
+          <form method="post" action="/validation/result/{int(r["id"])}">
+            <div class="two">
+              <div>
+                <label>結果</label>
+                <select name="kind">
+                  <option value="pending" {"selected" if r["result"]=="未確定" else ""}>未確定</option>
+                  <option value="hit" {"selected" if r["result"]=="的中" else ""}>的中</option>
+                  <option value="miss" {"selected" if r["result"]=="ハズレ" else ""}>ハズレ</option>
+                </select>
+              </div>
+              <div>
+                <label>払戻額</label>
+                <input name="return_amount" inputmode="numeric" value="{int(r["return_amount"] or 0)}">
+              </div>
+            </div>
+            <br><button class="green">検証結果を保存</button>
+          </form>
+        </div>
+        """
+
+    body = f"""
+    <div class="card">
+      <div class="title">予想検証ダッシュボード</div>
+      <div class="stats-grid">
+        <div><span>記録数</span><strong>{total}</strong></div>
+        <div><span>確定数</span><strong>{len(settled)}</strong></div>
+        <div><span>的中率</span><strong>{hit_rate:.1f}%</strong></div>
+        <div><span>回収率</span><strong>{recovery:.1f}%</strong></div>
+      </div>
+      <div class="note" style="margin-top:10px;">予想を最初に表示した時点の3点・グレード・展開・オッズ・推奨額を固定保存します。同じレースを再予想しても上書きしません。回収率は検証購入額がある確定記録を集計します。</div>
+      <div class="ok">検証収支：{profit:+,}円　／　検証購入額：{total_bet:,}円　／　払戻：{total_return:,}円</div>
+    </div>
+
+    <div class="card">
+      <div class="title">グレード別検証</div>
+      {('<div class="scroll"><table><tr><th>グレード</th><th>確定</th><th>的中</th><th>的中率</th><th>回収率</th><th>収支</th></tr>' + grade_rows + '</table></div>') if grade_rows else '<div class="note">確定済みデータがまだありません。</div>'}
+    </div>
+
+    {cards if cards else '<div class="card"><div class="note">検証記録はまだありません。個別予想または全レース一括予想を実行すると自動記録されます。</div></div>'}
+    """
+    return page(body, "予想検証")
+
+
+@app.post("/validation/result/<int:vid>")
+def validation_result(vid):
+    kind = request.form.get("kind", "pending")
+    if kind == "hit":
+        result_text = "的中"
+        ret = max(0, to_int(request.form.get("return_amount"), 0))
+        if ret <= 0:
+            return redirect(url_for("validation"))
+    elif kind == "miss":
+        result_text = "ハズレ"
+        ret = 0
+    else:
+        result_text = "未確定"
+        ret = 0
+
+    with db() as con:
+        con.execute(
+            "UPDATE validation_predictions SET result=?,return_amount=? WHERE id=?",
+            (result_text, ret, vid),
+        )
+    return redirect(url_for("validation"))
 
 
 @app.get("/health")
