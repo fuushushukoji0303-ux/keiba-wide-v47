@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-地方競馬ワイド投票管理 v50.2.1 - NAR結果取得修正版
+地方競馬ワイド投票管理 v50.3 - 新旧ロジック比較検証版
 
 主な追加:
 - NAR公式サイトから当日のワイドオッズ・単勝/複勝データを取得
@@ -181,6 +181,29 @@ def init_db():
                 "ALTER TABLE validation_predictions "
                 "ADD COLUMN official_wide TEXT DEFAULT ''"
             )
+
+        baseline_columns = [
+            ("baseline_grade", "TEXT DEFAULT ''"),
+            ("baseline_score", "INTEGER NOT NULL DEFAULT 0"),
+            ("baseline_candidate1", "TEXT DEFAULT ''"),
+            ("baseline_candidate2", "TEXT DEFAULT ''"),
+            ("baseline_candidate3", "TEXT DEFAULT ''"),
+            ("baseline_odds1", "REAL NOT NULL DEFAULT 0"),
+            ("baseline_odds2", "REAL NOT NULL DEFAULT 0"),
+            ("baseline_odds3", "REAL NOT NULL DEFAULT 0"),
+            ("baseline_amount1", "INTEGER NOT NULL DEFAULT 0"),
+            ("baseline_amount2", "INTEGER NOT NULL DEFAULT 0"),
+            ("baseline_amount3", "INTEGER NOT NULL DEFAULT 0"),
+            ("baseline_total_bet", "INTEGER NOT NULL DEFAULT 0"),
+            ("baseline_result", "TEXT NOT NULL DEFAULT '未確定'"),
+            ("baseline_return_amount", "INTEGER NOT NULL DEFAULT 0"),
+        ]
+        for col_name, col_type in baseline_columns:
+            if col_name not in validation_cols:
+                con.execute(
+                    f"ALTER TABLE validation_predictions "
+                    f"ADD COLUMN {col_name} {col_type}"
+                )
 
 
 
@@ -440,6 +463,29 @@ def parse_nar_wide_refunds(text):
         if payout > 0:
             result[combo] = payout
     return result
+
+
+
+def settle_baseline_row(row, refunds):
+    if not refunds:
+        return None
+
+    total_return = 0
+    hit = False
+    for i in range(1, 4):
+        combo = normalize_wide_combo(row[f"baseline_candidate{i}"] or "")
+        if not combo or combo not in refunds:
+            continue
+        hit = True
+        amount = int(row[f"baseline_amount{i}"] or 0)
+        payout100 = int(refunds[combo])
+        if amount > 0:
+            total_return += int(round(payout100 * (amount / 100.0)))
+
+    return {
+        "result": "的中" if hit else "ハズレ",
+        "return_amount": total_return,
+    }
 
 
 def nar_get_wide_refunds(course_name, race_no, race_date):
@@ -1392,6 +1438,202 @@ def select_three_by_mode(horses, wide_data, mode, form_data=None):
     return selected
 
 
+
+def select_three_baseline(horses, wide_data, mode):
+    """
+    比較用の旧ロジック。
+    近走・競馬場/距離適性・騎手・脚質/展開の補正を一切使わず、
+    元のオッズ/人気ルールだけで3点を選ぶ。
+    """
+    if len(horses) < 3 or not wide_data:
+        return []
+
+    wide_map = {item["combo"]: item for item in wide_data}
+    ranked = sorted(horses, key=lambda h: h["market_rank"])
+    candidates = []
+
+    def add_candidate(axis, partner, wide, score, reason):
+        confidence = max(1, min(99, int(round(100 - score * 5))))
+        candidates.append(
+            (score, axis, partner, wide, confidence, reason)
+        )
+
+    if mode == "堅め":
+        axis = ranked[0]
+        for partner in ranked[1:5]:
+            combo = make_pair_key(axis["horse_no"], partner["horse_no"])
+            wide = wide_map.get(combo)
+            if not wide:
+                continue
+            spread = max(0.0, wide["high"] - wide["low"])
+            score = (
+                abs(wide["low"] - 2.5) * 0.8
+                + (partner["market_rank"] - 2) * 0.55
+                + spread * 0.10
+            )
+            add_candidate(axis, partner, wide, score, "旧ロジック：オッズ・人気のみ")
+
+    elif mode == "穴狙い":
+        for axis in ranked[:3]:
+            for partner in ranked[2:8]:
+                if axis["horse_no"] == partner["horse_no"]:
+                    continue
+                combo = make_pair_key(axis["horse_no"], partner["horse_no"])
+                wide = wide_map.get(combo)
+                if not wide or wide["low"] < 4.0:
+                    continue
+                low = wide["low"]
+                spread = max(0.0, wide["high"] - wide["low"])
+                odds_penalty = abs(low - 7.0) * 0.55
+                if low > 12.0:
+                    odds_penalty += (low - 12.0) * 0.9
+                if low > 15.0:
+                    odds_penalty += 5.0
+                score = (
+                    odds_penalty
+                    + (axis["market_rank"] - 1) * 0.65
+                    + abs(partner["market_rank"] - 5) * 0.35
+                    + spread * 0.08
+                )
+                add_candidate(axis, partner, wide, score, "旧ロジック：オッズ・人気のみ")
+
+    else:
+        for axis in ranked[:2]:
+            for partner in ranked[1:6]:
+                if axis["horse_no"] == partner["horse_no"]:
+                    continue
+                combo = make_pair_key(axis["horse_no"], partner["horse_no"])
+                wide = wide_map.get(combo)
+                if not wide:
+                    continue
+                spread = max(0.0, wide["high"] - wide["low"])
+                score = (
+                    abs(wide["low"] - 5.5) * 0.75
+                    + (axis["market_rank"] - 1) * 0.45
+                    + abs(partner["market_rank"] - 4) * 0.30
+                    + spread * 0.08
+                )
+                add_candidate(axis, partner, wide, score, "旧ロジック：オッズ・人気のみ")
+
+    candidates.sort(key=lambda x: x[0])
+    selected, seen = [], set()
+    for score, axis, partner, wide, confidence, reason in candidates:
+        if wide["combo"] in seen:
+            continue
+        seen.add(wide["combo"])
+        selected.append({
+            "combo": wide["combo"],
+            "low": wide["low"],
+            "high": wide["high"],
+            "display": wide["display"],
+            "popularity": wide.get("popularity", ""),
+            "axis": axis,
+            "partner": partner,
+            "score": round(score, 2),
+            "confidence": confidence,
+            "reason": reason,
+        })
+        if len(selected) >= 3:
+            break
+    return selected
+
+
+def evaluate_race_rank_baseline(horses, wide_data, mode, remaining_budget):
+    """現行evaluate_race_rankと同じランク判定を、旧3点選定で行う。"""
+    recommendations = select_three_baseline(horses, wide_data, mode)
+
+    if len(recommendations) < 3:
+        return {
+            "grade": "見送り", "score": 0,
+            "reasons": ["旧ロジックで3点候補を作れませんでした。"],
+            "recommendations": recommendations,
+        }
+
+    if remaining_budget < 100:
+        return {
+            "grade": "見送り", "score": 0,
+            "reasons": ["本日の残り予算が100円未満です。"],
+            "recommendations": recommendations,
+        }
+
+    confidences = [x["confidence"] for x in recommendations]
+    avg_conf = sum(confidences) / len(confidences)
+    min_conf = min(confidences)
+
+    spread_ratios = []
+    for item in recommendations:
+        low = max(item["low"], 0.1)
+        spread_ratios.append(max(0.0, item["high"] - item["low"]) / low)
+    avg_spread = sum(spread_ratios) / len(spread_ratios)
+
+    ranked = sorted(horses, key=lambda h: h["market_rank"])
+    favorite_odds = ranked[0]["win_odds"] if ranked else 99.9
+
+    score = avg_conf
+    if avg_spread <= 0.12:
+        score += 3
+    elif avg_spread <= 0.22:
+        score += 1
+    elif avg_spread >= 0.45:
+        score -= 6
+    elif avg_spread >= 0.30:
+        score -= 3
+
+    if 1.4 <= favorite_odds <= 3.5:
+        score += 1
+    elif favorite_odds >= 8.0:
+        score -= 4
+
+    if min_conf < 75:
+        score -= 8
+    elif min_conf < 82:
+        score -= 4
+
+    if mode == "穴狙い":
+        score -= 4
+    elif mode == "堅め":
+        score += 1
+
+    score = max(0, min(100, int(round(score))))
+
+    if score >= 94 and min_conf >= 88 and mode != "穴狙い":
+        base_grade = "S"
+    elif score >= 88 and min_conf >= 82:
+        base_grade = "A"
+    elif score >= 79 and min_conf >= 72:
+        base_grade = "B"
+    else:
+        base_grade = "見送り"
+
+    grade = base_grade
+    if base_grade == "S":
+        if score >= 98 and min_conf >= 94 and avg_spread <= 0.35 and mode != "穴狙い":
+            grade = "S+"
+        elif score >= 95 and min_conf >= 90 and avg_spread <= 0.75 and mode != "穴狙い":
+            grade = "S"
+        else:
+            grade = "S-"
+
+    calibration = add_expected_value_metrics(recommendations)
+    add_priority_scores(recommendations)
+
+    if calibration["n"] >= 20:
+        values = [float(x.get("ev_index", 0)) for x in recommendations]
+        avg_ev = sum(values) / len(values) if values else 0
+        min_ev = min(values) if values else 0
+        if avg_ev < 0.90 or min_ev < 0.80:
+            grade = {
+                "S+": "S", "S": "S-", "S-": "A", "A": "見送り"
+            }.get(grade, grade)
+
+    return {
+        "grade": grade,
+        "score": score,
+        "reasons": ["比較用旧ロジック（オッズ・人気のみ）"],
+        "recommendations": recommendations,
+    }
+
+
 def history_calibration():
     with db() as con:
         rows = con.execute(
@@ -1734,7 +1976,7 @@ def save_pick(course, race, mode, result):
         ))
 
 
-def save_validation_prediction(course, race, mode, result, remaining_budget, pace=""):
+def save_validation_prediction(course, race, mode, result, remaining_budget, pace="", baseline_result=None):
     """
     予想を最初に出した時点の内容で固定保存する。
     同じ日・競馬場・R・モードを再予想しても上書きしない。
@@ -1754,15 +1996,34 @@ def save_validation_prediction(course, race, mode, result, remaining_budget, pac
     odds = [float((x or {}).get("low") or 0.0) for x in recs]
     total_bet = sum(int(x or 0) for x in amounts[:3])
 
+    baseline_result = baseline_result or {}
+    brecs = list(baseline_result.get("recommendations") or [])[:3]
+    brecs += [{}] * (3 - len(brecs))
+    ballocation = allocate_amounts(
+        baseline_result.get("grade", ""),
+        [x for x in brecs if x],
+        remaining_budget,
+    )
+    bamounts = list(ballocation.get("amounts") or [])
+    bamounts += [0] * (3 - len(bamounts))
+    bcombos = [str((x or {}).get("combo") or "") for x in brecs]
+    bodds = [float((x or {}).get("low") or 0.0) for x in brecs]
+    btotal_bet = sum(int(x or 0) for x in bamounts[:3])
+
     with db() as con:
         con.execute("""
         INSERT INTO validation_predictions(
             race_date,recorded_at,course,race,mode,grade,score,pace,
             candidate1,candidate2,candidate3,
             odds1,odds2,odds3,
-            amount1,amount2,amount3,total_bet
+            amount1,amount2,amount3,total_bet,
+            baseline_grade,baseline_score,
+            baseline_candidate1,baseline_candidate2,baseline_candidate3,
+            baseline_odds1,baseline_odds2,baseline_odds3,
+            baseline_amount1,baseline_amount2,baseline_amount3,
+            baseline_total_bet
         )
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(race_date,course,race,mode) DO NOTHING
         """, (
             today(), now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -1774,6 +2035,12 @@ def save_validation_prediction(course, race, mode, result, remaining_budget, pac
             odds[0], odds[1], odds[2],
             int(amounts[0] or 0), int(amounts[1] or 0), int(amounts[2] or 0),
             total_bet,
+            str(baseline_result.get("grade") or ""),
+            int(baseline_result.get("score") or 0),
+            bcombos[0], bcombos[1], bcombos[2],
+            bodds[0], bodds[1], bodds[2],
+            int(bamounts[0] or 0), int(bamounts[1] or 0), int(bamounts[2] or 0),
+            btotal_bet,
         ))
 
 
@@ -2739,8 +3006,14 @@ def analyze():
 
     remaining_budget = summary()["remaining"]
     result = evaluate_race_rank(horse_data, wide_data, mode, remaining_budget, form_data)
+    baseline_result = evaluate_race_rank_baseline(
+        horse_data, wide_data, mode, remaining_budget
+    )
     pace_now = predict_race_pace(form_data).get("pace", "判定不能")
-    save_validation_prediction(course, race, mode, result, remaining_budget, pace_now)
+    save_validation_prediction(
+        course, race, mode, result, remaining_budget, pace_now,
+        baseline_result
+    )
     save_pick(course, race, mode, result)
     recs = result["recommendations"][:3]
     allocation = allocate_amounts(result["grade"], recs, summary()["remaining"])
@@ -3424,6 +3697,9 @@ def course_batch():
                 horse_data, wide_data, mode, remaining, form_data
             )
             result["_validation_pace"] = predict_race_pace(form_data).get("pace", "判定不能")
+            result["_baseline_result"] = evaluate_race_rank_baseline(
+                horse_data, wide_data, mode, remaining
+            )
             return race_no, "ok", "", result
         except Exception as exc:
             return race_no, "error", f"{type(exc).__name__}: {exc}", None
@@ -3457,7 +3733,8 @@ def course_batch():
         # v50.1: B/見送りを含め、分析できた全レースを検証用に初回固定保存
         save_validation_prediction(
             course, race_no, mode, result, remaining,
-            result.get("_validation_pace", "判定不能")
+            result.get("_validation_pace", "判定不能"),
+            result.get("_baseline_result") or {}
         )
 
         if grade in ("S+", "S", "S-", "A"):
@@ -3514,6 +3791,51 @@ def validation():
     recovery = (total_return / total_bet * 100.0) if total_bet else 0.0
     profit = total_return - total_bet
 
+    # v50.3: 現行ロジックと旧ロジックの同条件比較
+    comparison_rows = [
+        r for r in rows
+        if "baseline_candidate1" in r.keys()
+        and str(r["baseline_candidate1"] or "")
+        and r["result"] in ("的中", "ハズレ")
+        and r["baseline_result"] in ("的中", "ハズレ")
+    ]
+    comp_n = len(comparison_rows)
+
+    current_hits = sum(1 for r in comparison_rows if r["result"] == "的中")
+    baseline_hits = sum(1 for r in comparison_rows if r["baseline_result"] == "的中")
+    current_hit_rate = current_hits / comp_n * 100.0 if comp_n else 0.0
+    baseline_hit_rate = baseline_hits / comp_n * 100.0 if comp_n else 0.0
+
+    current_comp_bet = sum(int(r["total_bet"] or 0) for r in comparison_rows)
+    current_comp_ret = sum(int(r["return_amount"] or 0) for r in comparison_rows)
+    baseline_comp_bet = sum(int(r["baseline_total_bet"] or 0) for r in comparison_rows)
+    baseline_comp_ret = sum(int(r["baseline_return_amount"] or 0) for r in comparison_rows)
+
+    current_comp_roi = (
+        current_comp_ret / current_comp_bet * 100.0 if current_comp_bet else 0.0
+    )
+    baseline_comp_roi = (
+        baseline_comp_ret / baseline_comp_bet * 100.0 if baseline_comp_bet else 0.0
+    )
+    current_comp_profit = current_comp_ret - current_comp_bet
+    baseline_comp_profit = baseline_comp_ret - baseline_comp_bet
+
+    # 3点が変わったレース数
+    changed_count = 0
+    for r in comparison_rows:
+        current_set = {
+            normalize_wide_combo(r[f"candidate{i}"] or "")
+            for i in range(1, 4)
+            if str(r[f"candidate{i}"] or "")
+        }
+        baseline_set = {
+            normalize_wide_combo(r[f"baseline_candidate{i}"] or "")
+            for i in range(1, 4)
+            if str(r[f"baseline_candidate{i}"] or "")
+        }
+        if current_set != baseline_set:
+            changed_count += 1
+
     # グレード別の確定成績
     grade_order = ["S+", "S", "S-", "A", "B", "見送り"]
     grade_rows = ""
@@ -3546,6 +3868,32 @@ def validation():
             picks.append(f"{i}位 {html.escape(combo)} {odds_text}{amount_text}")
         pick_html = "<br>".join(picks) or "候補なし"
 
+        baseline_picks = []
+        if "baseline_candidate1" in r.keys():
+            for i in range(1, 4):
+                combo = str(r[f"baseline_candidate{i}"] or "")
+                if not combo:
+                    continue
+                odds = float(r[f"baseline_odds{i}"] or 0)
+                amount = int(r[f"baseline_amount{i}"] or 0)
+                odds_text = f"{odds:.1f}倍" if odds else "オッズなし"
+                amount_text = f" / {amount:,}円" if amount else ""
+                baseline_picks.append(
+                    f"{i}位 {html.escape(combo)} {odds_text}{amount_text}"
+                )
+        baseline_pick_html = "<br>".join(baseline_picks)
+        baseline_box = ""
+        if baseline_pick_html:
+            bresult = html.escape(str(r["baseline_result"] or "未確定"))
+            breturn = int(r["baseline_return_amount"] or 0)
+            baseline_box = f"""
+            <div style="margin-top:10px;padding:10px;border:1px dashed #b8c4d0;border-radius:10px;background:#fafbfd;">
+              <div><strong>旧ロジック比較</strong>　グレード {html.escape(str(r["baseline_grade"] or ""))} ／ スコア {int(r["baseline_score"] or 0)}</div>
+              <div style="margin-top:6px;line-height:1.8;">{baseline_pick_html}</div>
+              <div class="small">結果：{bresult} ／ 払戻：{breturn:,}円 ／ 検証購入額：{int(r["baseline_total_bet"] or 0):,}円</div>
+            </div>
+            """
+
         status_class = "ok" if r["result"] == "的中" else ("bad" if r["result"] == "ハズレ" else "note")
         return_text = f'{int(r["return_amount"] or 0):,}円' if r["result"] == "的中" else ("0円" if r["result"] == "ハズレ" else "未確定")
         official_wide = str(r["official_wide"] or "") if "official_wide" in r.keys() else ""
@@ -3568,6 +3916,7 @@ def validation():
           <div class="{status_class}">結果：{html.escape(r["result"])} ／ 払戻：{return_text} ／ 検証購入額：{int(r["total_bet"] or 0):,}円</div>
           {official_html}
           {checked_html}
+          {baseline_box}
           <form method="post" action="/validation/result/{int(r["id"])}">
             <div class="two">
               <div>
@@ -3612,6 +3961,25 @@ def validation():
       </div>
       <div class="note" style="margin-top:10px;">予想を最初に表示した時点の3点・グレード・展開・オッズ・推奨額を固定保存します。同じレースを再予想しても上書きしません。「NAR公式から未確定結果を自動取得」を押すと、確定済みワイド払戻と3点を照合し、的中・ハズレ・払戻額を自動更新します。回収率は検証購入額がある確定記録を集計します。</div>
       <div class="ok">検証収支：{profit:+,}円　／　検証購入額：{total_bet:,}円　／　払戻：{total_return:,}円</div>
+    </div>
+
+    <div class="card">
+      <div class="title">現行ロジック vs 旧ロジック</div>
+      <div class="note">同じレース・同じ時点のオッズで比較します。旧ロジックは近走・競馬場距離適性・騎手・脚質・展開の補正を使わず、オッズと人気を中心に3点を選びます。v50.3以降の新規記録だけが比較対象です。</div>
+      {
+        f"""
+        <div class="scroll" style="margin-top:10px;">
+          <table>
+            <tr><th></th><th>確定</th><th>的中</th><th>的中率</th><th>回収率</th><th>収支</th></tr>
+            <tr><td><strong>現行</strong></td><td>{comp_n}件</td><td>{current_hits}件</td><td>{current_hit_rate:.1f}%</td><td>{current_comp_roi:.1f}%</td><td>{current_comp_profit:+,}円</td></tr>
+            <tr><td><strong>旧ロジック</strong></td><td>{comp_n}件</td><td>{baseline_hits}件</td><td>{baseline_hit_rate:.1f}%</td><td>{baseline_comp_roi:.1f}%</td><td>{baseline_comp_profit:+,}円</td></tr>
+          </table>
+        </div>
+        <div class="ok" style="margin-top:10px;">3点が変わったレース：{changed_count}/{comp_n}件</div>
+        """
+        if comp_n else
+        '<div class="note" style="margin-top:10px;">比較データはまだありません。v50.3で新しく予想したレースから自動で蓄積されます。</div>'
+      }
     </div>
 
     <div class="card">
@@ -3665,23 +4033,47 @@ def validation_auto_results():
             pending += 1
             continue
 
+        baseline_settled = None
+        if "baseline_candidate1" in row.keys() and str(row["baseline_candidate1"] or ""):
+            baseline_settled = settle_baseline_row(row, refunds)
+
         checked = now().strftime("%Y-%m-%d %H:%M:%S")
         with db() as con:
-            con.execute(
-                """
-                UPDATE validation_predictions
-                SET result=?, return_amount=?, checked_at=?,
-                    result_source='NAR公式', official_wide=?
-                WHERE id=? AND result='未確定'
-                """,
-                (
-                    settled["result"],
-                    int(settled["return_amount"]),
-                    checked,
-                    settled["official_wide"],
-                    int(row["id"]),
-                ),
-            )
+            if baseline_settled:
+                con.execute(
+                    """
+                    UPDATE validation_predictions
+                    SET result=?, return_amount=?, checked_at=?,
+                        result_source='NAR公式', official_wide=?,
+                        baseline_result=?, baseline_return_amount=?
+                    WHERE id=? AND result='未確定'
+                    """,
+                    (
+                        settled["result"],
+                        int(settled["return_amount"]),
+                        checked,
+                        settled["official_wide"],
+                        baseline_settled["result"],
+                        int(baseline_settled["return_amount"]),
+                        int(row["id"]),
+                    ),
+                )
+            else:
+                con.execute(
+                    """
+                    UPDATE validation_predictions
+                    SET result=?, return_amount=?, checked_at=?,
+                        result_source='NAR公式', official_wide=?
+                    WHERE id=? AND result='未確定'
+                    """,
+                    (
+                        settled["result"],
+                        int(settled["return_amount"]),
+                        checked,
+                        settled["official_wide"],
+                        int(row["id"]),
+                    ),
+                )
         updated += 1
 
     return redirect(
