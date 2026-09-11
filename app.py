@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-地方競馬ワイド投票管理 v49.7.1 - 脚質通過順取得修正版
+地方競馬ワイド投票管理 v49.8 - 展開ペース予測確認版
 
 主な追加:
 - NAR公式サイトから当日のワイドオッズ・単勝/複勝データを取得
@@ -670,6 +670,52 @@ def running_style_from_corners(corner_histories):
     return style, round(confidence, 1)
 
 
+
+def predict_race_pace(form_data):
+    """
+    各馬の脚質からレース全体の展開・ペースを簡易判定。
+    v49.8では表示確認だけで、予想順位・買い目には反映しない。
+    """
+    styles = []
+    for f in (form_data or {}).values():
+        style = (f or {}).get("running_style")
+        if style in ("逃げ", "先行", "差し", "追込"):
+            styles.append(style)
+
+    if not styles:
+        return {
+            "pace": "判定不能", "nige": 0, "senko": 0,
+            "sashi": 0, "oikomi": 0,
+            "comment": "脚質データが不足しています。"
+        }
+
+    nige = styles.count("逃げ")
+    senko = styles.count("先行")
+    sashi = styles.count("差し")
+    oikomi = styles.count("追込")
+    known = len(styles)
+    front_ratio = (nige + senko) / known
+
+    if nige >= 3 or (nige >= 2 and front_ratio >= 0.50):
+        pace = "ハイペース寄り"
+        comment = "前へ行きたい馬が多く、差し・追込に流れが向く可能性があります。"
+    elif nige == 0 and front_ratio <= 0.35:
+        pace = "スローペース寄り"
+        comment = "逃げ候補が少なく、前残りになりやすい可能性があります。"
+    elif nige <= 1 and front_ratio <= 0.45:
+        pace = "スローペース寄り"
+        comment = "前の競り合いが強くなりにくく、先行勢に流れが向く可能性があります。"
+    else:
+        pace = "平均ペース"
+        comment = "極端な前傾・後傾になりにくい構成です。"
+
+    return {
+        "pace": pace, "nige": nige, "senko": senko,
+        "sashi": sashi, "oikomi": oikomi,
+        "comment": comment
+    }
+
+
 def jockey_rating(form):
     """
     騎手の当年勝率・連対率を0〜100点へ換算。
@@ -856,10 +902,29 @@ def form_data_panel(horses, form_data):
             '従来ロジックは変更していません。</div></div>'
         )
 
+    pace_info = predict_race_pace(form_data)
+    pace_name = html.escape(str(pace_info.get("pace", "判定不能")))
+    pace_comment = html.escape(str(pace_info.get("comment", "")))
+    pace_counts = html.escape(
+        f'逃げ {int(pace_info.get("nige", 0))}頭 ／ '
+        f'先行 {int(pace_info.get("senko", 0))}頭 ／ '
+        f'差し {int(pace_info.get("sashi", 0))}頭 ／ '
+        f'追込 {int(pace_info.get("oikomi", 0))}頭'
+    )
+
     return f"""
     <div class="card">
       <div class="title">精度アップ用データ取得状況</div>
-      <div class="ok">近走・競馬場適性・距離適性を {matched}頭分取得しました。騎手成績は予想へ控えめに反映しています。脚質は過去走の通過順から取得確認中で、まだ予想順位には反映していません。</div>
+      <div class="ok">近走・競馬場適性・距離適性を {matched}頭分取得しました。騎手成績は予想へ控えめに反映しています。脚質と展開・ペース予測は取得確認中で、まだ予想順位には反映していません。</div>
+
+      <div style="margin:12px 0;padding:12px 14px;border:1px solid #cfd8dc;border-radius:12px;background:#f8fbfc;">
+        <div style="font-weight:800;margin-bottom:5px;">展開・ペース予測（確認中）</div>
+        <div style="font-size:1.08em;"><strong>{pace_name}</strong></div>
+        <div style="margin-top:4px;">{pace_counts}</div>
+        <div style="margin-top:4px;">{pace_comment}</div>
+        <div style="margin-top:5px;font-size:0.85em;">※ v49.8では表示確認のみ。まだ予想順位・買い目には反映していません。</div>
+      </div>
+
       <div class="scroll">
         <table>
           <tr><th>馬番</th><th>馬名</th><th>近5走着順</th><th>競馬場 複勝率</th><th>距離 複勝率</th><th>実績評価</th><th>騎手</th><th>騎手 勝率</th><th>騎手 連対率</th><th>騎手評価</th><th>過去走 通過順</th><th>脚質判定</th></tr>
