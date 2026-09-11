@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-地方競馬ワイド投票管理 v49.6 - 騎手評価控えめ反映版
+地方競馬ワイド投票管理 v49.7 - 脚質データ取得確認版
 
 主な追加:
 - NAR公式サイトから当日のワイドオッズ・単勝/複勝データを取得
@@ -526,12 +526,18 @@ def nar_get_form_data(course_name, race_no, horses=None):
                 if len(recent) >= 5:
                     break
 
+        corner_histories = _extract_corner_histories(block)
+        running_style, style_confidence = running_style_from_corners(corner_histories)
+
         result[horse_no] = {
             "recent_finishes": recent[:5],
             "track": track,
             "distance": distance,
             "jockey": jockey,
             "jockey_affiliation": jockey_affiliation,
+            "corner_histories": corner_histories,
+            "running_style": running_style,
+            "style_confidence": style_confidence,
         }
 
     return result
@@ -578,6 +584,91 @@ def horse_form_rating(form):
     weight_sum = sum(w for _, w in parts)
     return round(sum(v * w for v, w in parts) / weight_sum, 1)
 
+
+
+
+def _extract_corner_histories(block):
+    """
+    NAR出馬表の過去走部分からコーナー通過順を最大5走ぶん抽出。
+    例: 1-1 / 2-2-3 / 8-7-5-4
+    着別成績（4-4-6-33等）や日付は除外する。
+    """
+    if not block:
+        return []
+
+    # 「場」「距」など通算成績より後ろは対象外にする。
+    past = block
+    cut_positions = []
+    for marker in (" 全 ", " 左 ", " 右 ", " 場 ", " 距 "):
+        p = past.find(marker)
+        if p >= 0:
+            cut_positions.append(p)
+    if cut_positions:
+        past = past[:min(cut_positions)]
+
+    # 2〜4個の小さな整数で構成される通過順だけを候補にする。
+    # 日付 2026-09-11、成績 4-4-6-33、タイム等は除外。
+    raw = re.findall(r"(?<![\d.])(\d{1,2}(?:\s*-\s*\d{1,2}){1,3})(?![\d.])", past)
+    out = []
+    for s in raw:
+        nums = [int(x) for x in re.findall(r"\d+", s)]
+        if not (2 <= len(nums) <= 4):
+            continue
+        if any(n <= 0 or n > 18 for n in nums):
+            continue
+        # 同じ候補の連続重複を避ける
+        if not out or out[-1] != nums:
+            out.append(nums)
+        if len(out) >= 5:
+            break
+    return out
+
+
+def running_style_from_corners(corner_histories):
+    """
+    通過順位から簡易脚質を判定。
+    v49.7では表示確認専用で、予想スコアには反映しない。
+    """
+    if not corner_histories:
+        return "取得なし", 0.0
+
+    scores = []
+    for seq in corner_histories[:5]:
+        if not seq:
+            continue
+        first = seq[0]
+        last = seq[-1]
+
+        # 前半位置を主に、終盤まで前にいるかも少し見る。
+        if first <= 1:
+            s = 0.0       # 逃げ寄り
+        elif first <= 3:
+            s = 1.0       # 先行寄り
+        elif first <= 6:
+            s = 2.0       # 差し寄り
+        else:
+            s = 3.0       # 追込寄り
+
+        # 前半後方でも大きく押し上げる馬は差し側へ少し寄せる
+        if first - last >= 3:
+            s = max(1.5, s - 0.4)
+        scores.append(s)
+
+    if not scores:
+        return "取得なし", 0.0
+
+    avg = sum(scores) / len(scores)
+    if avg < 0.65:
+        style = "逃げ"
+    elif avg < 1.55:
+        style = "先行"
+    elif avg < 2.55:
+        style = "差し"
+    else:
+        style = "追込"
+
+    confidence = min(100.0, 35.0 + len(scores) * 13.0)
+    return style, round(confidence, 1)
 
 
 def jockey_rating(form):
@@ -728,6 +819,11 @@ def form_data_panel(horses, form_data):
         win_text=(f'{js["win_rate"]:.1f}%' if js and js.get("win_rate") is not None else "取得なし")
         quinella_text=(f'{js["quinella_rate"]:.1f}%' if js and js.get("quinella_rate") is not None else "取得なし")
         jockey_rating_text=f"{jockey_rating(f):.1f}"
+        corner_histories=f.get("corner_histories") or []
+        corner_text=" / ".join("-".join(str(x) for x in seq) for seq in corner_histories) if corner_histories else "取得なし"
+        running_style=f.get("running_style") or "取得なし"
+        style_conf=f.get("style_confidence") or 0.0
+        style_text=(f"{running_style} ({style_conf:.0f}%)" if running_style!="取得なし" else "取得なし")
 
         track = f.get("track")
         distance = f.get("distance")
@@ -749,7 +845,9 @@ def form_data_panel(horses, form_data):
             f"<td><strong>{form_rating:.1f}</strong></td>"
             f"<td>{html.escape(jockey_text)}</td><td>{html.escape(win_text)}</td>"
             f"<td>{html.escape(quinella_text)}</td>"
-            f"<td><strong>{html.escape(jockey_rating_text)}</strong></td></tr>"
+            f"<td><strong>{html.escape(jockey_rating_text)}</strong></td>"
+            f"<td>{html.escape(corner_text)}</td>"
+            f"<td><strong>{html.escape(style_text)}</strong></td></tr>"
         )
 
     if not rows:
@@ -762,10 +860,10 @@ def form_data_panel(horses, form_data):
     return f"""
     <div class="card">
       <div class="title">精度アップ用データ取得状況</div>
-      <div class="ok">近走・競馬場適性・距離適性を {matched}頭分取得しました。騎手成績はワイド向けに連対率をやや重視し、予想へ控えめに反映しています。</div>
+      <div class="ok">近走・競馬場適性・距離適性を {matched}頭分取得しました。騎手成績は予想へ控えめに反映しています。脚質は過去走の通過順から取得確認中で、まだ予想順位には反映していません。</div>
       <div class="scroll">
         <table>
-          <tr><th>馬番</th><th>馬名</th><th>近5走着順</th><th>競馬場 複勝率</th><th>距離 複勝率</th><th>実績評価</th><th>騎手</th><th>騎手 勝率</th><th>騎手 連対率</th><th>騎手評価</th></tr>
+          <tr><th>馬番</th><th>馬名</th><th>近5走着順</th><th>競馬場 複勝率</th><th>距離 複勝率</th><th>実績評価</th><th>騎手</th><th>騎手 勝率</th><th>騎手 連対率</th><th>騎手評価</th><th>過去走 通過順</th><th>脚質判定</th></tr>
           {rows}
         </table>
       </div>
