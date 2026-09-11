@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-地方競馬ワイド投票管理 v49.4 - 買い目仮確定対応版
+地方競馬ワイド投票管理 v49.5 - 騎手成績取得確認版
 
 主な追加:
 - NAR公式サイトから当日のワイドオッズ・単勝/複勝データを取得
@@ -490,6 +490,15 @@ def nar_get_form_data(course_name, race_no, horses=None):
         track = _record_stats(block, "場")
         distance = _record_stats(block, "距")
 
+        jockey=""
+        jockey_affiliation=""
+        before_all=block.split(" 全 ",1)[0]
+        pairs=re.findall(r"([A-Za-zＡ-Ｚａ-ｚ一-龥々ヶヵァ-ヶー\\.．・]{2,16})\\s*[（(]([^）)]+)[）)]",before_all)
+        for person,aff in reversed(pairs):
+            aff=str(aff).strip()
+            if aff in JOCKEY_CODES:
+                jockey=_jname(person); jockey_affiliation=aff; break
+
         recent = []
 
         # PC版出馬表: 「4 26.08.28 不良 9頭」のような形式
@@ -521,6 +530,8 @@ def nar_get_form_data(course_name, race_no, horses=None):
             "recent_finishes": recent[:5],
             "track": track,
             "distance": distance,
+            "jockey": jockey,
+            "jockey_affiliation": jockey_affiliation,
         }
 
     return result
@@ -576,6 +587,56 @@ def apply_form_ratings(horses, form_data):
     return horses
 
 
+
+JOCKEY_CODES={"北海道":"1","岩手":"2","金沢":"6","愛知":"7","笠松":"8","兵庫":"11","高知":"15","佐賀":"17","ばんえい":"21","大井":"26","川崎":"27","船橋":"28","浦和":"29"}
+_JOCKEY_CACHE={}
+
+def _jname(s):
+    return re.sub(r"[\s\u3000]+","",str(s or ""))
+
+def nar_get_jockey_leading(aff):
+    code=JOCKEY_CODES.get(str(aff or "").strip())
+    if not code:
+        return {}
+    key=(today(),code)
+    if key in _JOCKEY_CACHE:
+        return _JOCKEY_CACHE[key]
+    url=("https://www.keiba.go.jp/KeibaWeb/DataRoom/RiderLeading"
+         f"?k_nenndo={now().year}&k_out_flag=1&k_syozoku={code}&selectedOption=80")
+    req=urllib.request.Request(url,headers={"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/140 Safari/537.36","Accept-Language":"ja-JP,ja;q=0.9"})
+    with urllib.request.urlopen(req,timeout=15) as res:
+        raw=res.read()
+    page=None
+    for enc in ("utf-8","cp932","shift_jis"):
+        try:
+            page=raw.decode(enc); break
+        except UnicodeDecodeError:
+            pass
+    if page is None:
+        page=raw.decode("utf-8",errors="replace")
+    p=SimpleTableParser(); p.feed(page); out={}
+    for row in p.rows:
+        c=[" ".join(str(x).split()) for x in row]
+        if len(c)<12 or not re.fullmatch(r"\d+",c[0].replace(" ","")):
+            continue
+        def n(i):
+            try:return float(re.sub(r"[^\d.-]","",c[i]))
+            except:return None
+        out[_jname(c[1])]={"name":_jname(c[1]),"affiliation":c[2],
+            "wins":n(3),"seconds":n(4),"thirds":n(5),"total":n(9),
+            "win_rate":n(10),"quinella_rate":n(11)}
+    _JOCKEY_CACHE[key]=out
+    return out
+
+def attach_jockey_stats(fd):
+    for f in (fd or {}).values():
+        name=_jname(f.get("jockey")); aff=str(f.get("jockey_affiliation") or "").strip()
+        f["jockey"]=name; f["jockey_stats"]=None
+        if name and aff:
+            try:f["jockey_stats"]=nar_get_jockey_leading(aff).get(name)
+            except Exception:pass
+    return fd
+
 def form_data_panel(horses, form_data):
     """取得した実績データと実績評価点を表示。"""
     if not form_data:
@@ -599,6 +660,11 @@ def form_data_panel(horses, form_data):
         recent = f.get("recent_finishes") or []
         form_rating = horse_form_rating(f)
         recent_text = "・".join(str(x) for x in recent) if recent else "取得なし"
+        jockey=f.get("jockey") or "取得なし"
+        js=f.get("jockey_stats")
+        jockey_text=(f'{jockey}（{f.get("jockey_affiliation","")}）' if jockey!="取得なし" else jockey)
+        win_text=(f'{js["win_rate"]:.1f}%' if js and js.get("win_rate") is not None else "取得なし")
+        quinella_text=(f'{js["quinella_rate"]:.1f}%' if js and js.get("quinella_rate") is not None else "取得なし")
 
         track = f.get("track")
         distance = f.get("distance")
@@ -617,7 +683,9 @@ def form_data_panel(horses, form_data):
             f"<td>{html.escape(recent_text)}</td>"
             f"<td>{html.escape(track_text)}</td>"
             f"<td>{html.escape(distance_text)}</td>"
-            f"<td><strong>{form_rating:.1f}</strong></td></tr>"
+            f"<td><strong>{form_rating:.1f}</strong></td>"
+            f"<td>{html.escape(jockey_text)}</td><td>{html.escape(win_text)}</td>"
+            f"<td>{html.escape(quinella_text)}</td></tr>"
         )
 
     if not rows:
@@ -630,10 +698,10 @@ def form_data_panel(horses, form_data):
     return f"""
     <div class="card">
       <div class="title">精度アップ用データ取得状況</div>
-      <div class="ok">近走・競馬場適性・距離適性を {matched}頭分取得しました。実績評価は予想へ控えめに反映しています。</div>
+      <div class="ok">近走・競馬場適性・距離適性を {matched}頭分取得しました。騎手成績は取得確認段階で、まだ予想順位には反映していません。</div>
       <div class="scroll">
         <table>
-          <tr><th>馬番</th><th>馬名</th><th>近5走着順</th><th>競馬場 複勝率</th><th>距離 複勝率</th><th>実績評価</th></tr>
+          <tr><th>馬番</th><th>馬名</th><th>近5走着順</th><th>競馬場 複勝率</th><th>距離 複勝率</th><th>実績評価</th><th>騎手</th><th>騎手 勝率</th><th>騎手 連対率</th></tr>
           {rows}
         </table>
       </div>
@@ -2052,6 +2120,7 @@ def analyze():
     # v49 Step1: 近走・競馬場・距離適性の取得確認。失敗時も従来予想を継続。
     try:
         form_data = nar_get_form_data(course, race, horse_data)
+        attach_jockey_stats(form_data)
     except Exception:
         form_data = {}
 
