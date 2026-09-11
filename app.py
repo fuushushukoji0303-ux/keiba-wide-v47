@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-地方競馬ワイド投票管理 v50.3 - 新旧ロジック比較検証版
+地方競馬ワイド投票管理 v50.3.1 - スマホ表示改善版
 
 主な追加:
 - NAR公式サイトから当日のワイドオッズ・単勝/複勝データを取得
@@ -1194,6 +1194,7 @@ def form_data_panel(horses, form_data):
 
     by_no = {int(h["horse_no"]): h for h in horses}
     rows = ""
+    mobile_cards = ""
     matched = 0
 
     for horse_no in sorted(form_data):
@@ -1246,6 +1247,37 @@ def form_data_panel(horses, form_data):
             f"<td><strong>{html.escape(pace_fit_text)}</strong></td></tr>"
         )
 
+        mobile_cards += f"""
+        <div class="form-mobile-card">
+          <div class="form-mobile-head">
+            <div class="form-horse-no">{horse_no}</div>
+            <div class="form-horse-name">{html.escape(str(h.get('horse_name','')))}</div>
+            <div class="form-fit">{html.escape(pace_fit_text)}</div>
+          </div>
+
+          <div class="form-mobile-grid">
+            <div><span>近5走</span><strong>{html.escape(recent_text)}</strong></div>
+            <div><span>実績評価</span><strong>{form_rating:.1f}</strong></div>
+            <div><span>競馬場 複勝率</span><strong>{html.escape(track_text)}</strong></div>
+            <div><span>距離 複勝率</span><strong>{html.escape(distance_text)}</strong></div>
+          </div>
+
+          <div class="form-mobile-jockey">
+            <div><span>騎手</span><strong>{html.escape(jockey_text)}</strong></div>
+            <div class="form-jockey-stats">
+              <span>勝率 {html.escape(win_text)}</span>
+              <span>連対率 {html.escape(quinella_text)}</span>
+              <span>評価 {html.escape(jockey_rating_text)}</span>
+            </div>
+          </div>
+
+          <div class="form-mobile-bottom">
+            <div><span>脚質</span><strong>{html.escape(style_text)}</strong></div>
+            <div><span>過去走 通過順</span><strong>{html.escape(corner_text)}</strong></div>
+          </div>
+        </div>
+        """
+
     if not rows:
         return (
             '<div class="card"><div class="title">精度アップ用データ取得状況</div>'
@@ -1283,11 +1315,14 @@ def form_data_panel(horses, form_data):
         <div style="margin-top:7px;font-size:0.85em;">※ 展開予測を詳しく表示しますが、予想補正はv49.9と同じ最大±0.30点のままです。</div>
       </div>
 
-      <div class="scroll">
+      <div class="scroll form-desktop-table">
         <table>
           <tr><th>馬番</th><th>馬名</th><th>近5走着順</th><th>競馬場 複勝率</th><th>距離 複勝率</th><th>実績評価</th><th>騎手</th><th>騎手 勝率</th><th>騎手 連対率</th><th>騎手評価</th><th>過去走 通過順</th><th>脚質判定</th><th>展開適性</th></tr>
           {rows}
         </table>
+      </div>
+      <div class="form-mobile-list">
+        {mobile_cards}
       </div>
     </div>
     """
@@ -2069,6 +2104,109 @@ button,.btn{border:0;border-radius:10px;background:var(--blue);color:white;paddi
 table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:8px 5px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}th{color:var(--muted)}.scroll{overflow:auto}
 .rank1{font-weight:800;background:#f7fbff}.small{font-size:12px;color:var(--muted)}
 @media(max-width:700px){.grid{grid-template-columns:1fr 1fr}.row,.two{grid-template-columns:1fr}.wrap{padding:9px}.metric strong{font-size:18px}}
+
+
+/* ===== v50.3.1 スマホ版 精度アップデータ見やすさ改善 ===== */
+.form-mobile-list{display:none}
+@media(max-width:760px){
+  .form-desktop-table{display:none}
+  .form-mobile-list{display:block}
+  .form-mobile-card{
+    border:1px solid var(--line);
+    border-radius:14px;
+    padding:12px;
+    margin:10px 0;
+    background:#fff;
+    box-shadow:0 1px 4px rgba(23,32,45,.05)
+  }
+  .form-mobile-head{
+    display:grid;
+    grid-template-columns:34px minmax(0,1fr) auto;
+    gap:8px;
+    align-items:center;
+    padding-bottom:9px;
+    border-bottom:1px solid var(--line)
+  }
+  .form-horse-no{
+    width:34px;
+    height:34px;
+    border-radius:50%;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    background:#edf3f8;
+    font-size:18px;
+    font-weight:900
+  }
+  .form-horse-name{
+    min-width:0;
+    font-size:17px;
+    font-weight:900;
+    line-height:1.25;
+    overflow-wrap:anywhere
+  }
+  .form-fit{
+    white-space:nowrap;
+    font-size:12px;
+    font-weight:800;
+    padding:5px 8px;
+    border-radius:999px;
+    background:#eef7f2;
+    color:#17613a
+  }
+  .form-mobile-grid{
+    display:grid;
+    grid-template-columns:1fr 1fr;
+    gap:8px;
+    margin-top:10px
+  }
+  .form-mobile-grid>div,
+  .form-mobile-jockey,
+  .form-mobile-bottom>div{
+    background:#f7f9fc;
+    border-radius:10px;
+    padding:9px
+  }
+  .form-mobile-card span{
+    display:block;
+    color:var(--muted);
+    font-size:11px;
+    margin-bottom:3px
+  }
+  .form-mobile-card strong{
+    display:block;
+    font-size:14px;
+    line-height:1.45;
+    overflow-wrap:anywhere
+  }
+  .form-mobile-jockey{
+    margin-top:8px
+  }
+  .form-jockey-stats{
+    display:flex;
+    gap:10px;
+    flex-wrap:wrap;
+    margin-top:7px
+  }
+  .form-jockey-stats span{
+    margin:0;
+    color:#33465d;
+    font-size:12px;
+    font-weight:700
+  }
+  .form-mobile-bottom{
+    display:grid;
+    grid-template-columns:.8fr 1.2fr;
+    gap:8px;
+    margin-top:8px
+  }
+}
+@media(max-width:420px){
+  .form-mobile-grid,
+  .form-mobile-bottom{grid-template-columns:1fr}
+  .form-mobile-head{grid-template-columns:32px minmax(0,1fr)}
+  .form-fit{grid-column:2;justify-self:start}
+}
 
 /* ===== ワクワク競馬 リリース用ブランド表示 ===== */
 .brand-hero{
