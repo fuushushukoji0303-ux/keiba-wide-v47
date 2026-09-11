@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-地方競馬ワイド投票管理 v50.0 - 展開予測詳細版
+地方競馬ワイド投票管理 v50.0.1 - 展開予測詳細修正版
 
 主な追加:
 - NAR公式サイトから当日のワイドオッズ・単勝/複勝データを取得
@@ -1029,7 +1029,7 @@ def form_data_panel(horses, form_data):
         )
 
     pace_info = predict_race_pace(form_data)
-    scenario = build_race_scenario(form_data, horse_data)
+    scenario = build_race_scenario(form_data, horses)
     pace_name = html.escape(str(pace_info.get("pace", "判定不能")))
     pace_comment = html.escape(str(pace_info.get("comment", "")))
     pace_counts = html.escape(
