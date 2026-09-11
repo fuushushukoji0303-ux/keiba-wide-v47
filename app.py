@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-地方競馬ワイド投票管理 v49.5.1 - 騎手成績取得修正版
+地方競馬ワイド投票管理 v49.5.2 - 騎手短縮名対応版
 
 主な追加:
 - NAR公式サイトから当日のワイドオッズ・単勝/複勝データを取得
@@ -636,6 +636,8 @@ def attach_jockey_stats(fd):
             try:
                 leading=nar_get_jockey_leading(aff)
                 stat=leading.get(name)
+
+                # 1) 前方一致（例: 新原周 -> 新原周馬）
                 if stat is None:
                     candidates=[
                         v for k,v in leading.items()
@@ -643,6 +645,21 @@ def attach_jockey_stats(fd):
                     ]
                     if len(candidates)==1:
                         stat=candidates[0]
+
+                # 2) NAR出馬表の短縮表記にも対応
+                #    例: 山林信 -> 山林堂信彦
+                if stat is None and len(name) >= 3:
+                    def is_subsequence(shorter, longer):
+                        it=iter(longer)
+                        return all(ch in it for ch in shorter)
+
+                    candidates=[
+                        v for k,v in leading.items()
+                        if is_subsequence(name, k) or is_subsequence(k, name)
+                    ]
+                    if len(candidates)==1:
+                        stat=candidates[0]
+
                 f["jockey_stats"]=stat
             except Exception:
                 pass
