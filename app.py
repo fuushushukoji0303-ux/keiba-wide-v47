@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-地方競馬ワイド投票管理 v49.3 - 実績データ控えめ反映版
+地方競馬ワイド投票管理 v49.4 - 買い目仮確定対応版
 
 主な追加:
 - NAR公式サイトから当日のワイドオッズ・単勝/複勝データを取得
@@ -124,6 +124,13 @@ def init_db():
         purchase_cols = {r["name"] for r in con.execute("PRAGMA table_info(purchases)").fetchall()}
         if "mode" not in purchase_cols:
             con.execute("ALTER TABLE purchases ADD COLUMN mode TEXT NOT NULL DEFAULT '不明'")
+
+        # v49.4 migration: 勝負レースの買い目固定
+        pick_cols = {r["name"] for r in con.execute("PRAGMA table_info(picks)").fetchall()}
+        if "locked" not in pick_cols:
+            con.execute("ALTER TABLE picks ADD COLUMN locked INTEGER NOT NULL DEFAULT 0")
+        if "locked_at" not in pick_cols:
+            con.execute("ALTER TABLE picks ADD COLUMN locked_at TEXT DEFAULT ''")
 
 
 
@@ -1084,6 +1091,7 @@ def save_pick(course, race, mode, result):
         ON CONFLICT(race_date,course,race,mode) DO UPDATE SET
         saved_at=excluded.saved_at,grade=excluded.grade,score=excluded.score,
         candidate1=excluded.candidate1,candidate2=excluded.candidate2,candidate3=excluded.candidate3
+        WHERE picks.locked=0
         """, (
             today(), now().strftime("%Y-%m-%d %H:%M:%S"),
             course, f"{race}R", mode, result["grade"], int(result["score"]),
@@ -2170,30 +2178,187 @@ def record():
 
 @app.get("/picks")
 def picks():
+    msg = request.args.get("msg", "")
     with db() as con:
         rows = con.execute(
             "SELECT * FROM picks WHERE race_date=? ORDER BY "
+            "locked DESC,"
             "CASE grade WHEN 'S+' THEN 1 WHEN 'S' THEN 2 WHEN 'S-' THEN 3 WHEN 'A' THEN 4 ELSE 9 END,"
             "score DESC, id DESC",
             (today(),),
         ).fetchall()
 
     trs = ""
+    mobile = ""
     for r in rows:
+        locked = int(r["locked"] or 0) == 1
+        status = "🔒 仮確定" if locked else "更新中"
+        action_text = "固定解除" if locked else "この3点を仮確定"
+        action_class = "secondary" if locked else "green"
+        lock_note = (
+            f'<div class="small">固定日時 {html.escape(r["locked_at"] or "")}</div>'
+            if locked and r["locked_at"] else ""
+        )
+
         trs += (
             f"<tr><td><strong>{html.escape(r['course'])} {html.escape(r['race'])}</strong></td>"
             f"<td>{html.escape(r['mode'])}</td><td><strong>{html.escape(r['grade'])}</strong></td>"
-            f"<td>{r['score']}</td><td>{html.escape(r['candidate1'])}<br>{html.escape(r['candidate2'])}<br>{html.escape(r['candidate3'])}</td></tr>"
+            f"<td>{r['score']}</td>"
+            f"<td>{html.escape(r['candidate1'])}<br>{html.escape(r['candidate2'])}<br>{html.escape(r['candidate3'])}</td>"
+            f"<td><strong>{status}</strong>{lock_note}"
+            f"<form method='post' action='/picks/toggle/{r['id']}' style='margin-top:6px'>"
+            f"<button class='{action_class}' type='submit'>{action_text}</button></form>"
+            + (
+                f"<form method='post' action='/picks/apply/{r['id']}' style='margin-top:6px'>"
+                f"<button class='green' type='submit'>固定3点をホームへ入力</button></form>"
+                if locked else ""
+            )
+            + "</td></tr>"
         )
 
+        mobile += f"""
+        <div class="card">
+          <div class="title">{html.escape(r['course'])} {html.escape(r['race'])}　
+            <span class="badge">{html.escape(r['grade'])}</span>
+          </div>
+          <div class="small">{html.escape(r['mode'])}モード　参考スコア {r['score']}</div>
+          <div style="margin:10px 0;line-height:1.8">
+            {html.escape(r['candidate1'])}<br>
+            {html.escape(r['candidate2'])}<br>
+            {html.escape(r['candidate3'])}
+          </div>
+          <div class="{'ok' if locked else 'note'}"><strong>{status}</strong>
+            {lock_note}
+            {'この3点は再分析しても自動では変更されません。' if locked else 'オッズ更新に合わせて買い目が更新される状態です。'}
+          </div>
+          <div class="actions">
+            <form method="post" action="/picks/toggle/{r['id']}">
+              <button class="{action_class}" type="submit">{action_text}</button>
+            </form>
+            {f'<form method="post" action="/picks/apply/{r["id"]}"><button class="green" type="submit">固定3点をホームへ入力</button></form>' if locked else ''}
+          </div>
+        </div>
+        """
+
     if not trs:
-        trs = '<tr><td colspan="5">まだ勝負レース候補はありません。「オッズ・3点予想」で分析したS/A系レースがここに保存されます。</td></tr>'
+        trs = '<tr><td colspan="6">まだ勝負レース候補はありません。「オッズ・3点予想」で分析したS/A系レースがここに保存されます。</td></tr>'
+        mobile = '<div class="note">まだ勝負レース候補はありません。</div>'
 
     return page(
-        f"""<div class="card"><div class="title">今日の勝負レース</div>
-        <div class="scroll"><table><tr><th>レース</th><th>モード</th><th>判定</th><th>スコア</th><th>3点候補</th></tr>{trs}</table></div></div>""",
+        (f'<div class="ok">{html.escape(msg)}</div>' if msg else "")
+        + """<div class="card">
+          <div class="title">買い目固定について</div>
+          <div class="note">仕事などで直前確認できないレースは「この3点を仮確定」を押してください。
+          固定後は再分析しても3点を自動で上書きしません。購入時のオッズだけは最新値を取り直して、購入額を再計算します。</div>
+        </div>"""
+        + f"""<div class="mobile-history">{mobile}</div>
+        <div class="card desktop-history"><div class="title">今日の勝負レース</div>
+        <div class="scroll"><table><tr><th>レース</th><th>モード</th><th>判定</th><th>スコア</th><th>3点候補</th><th>固定</th></tr>{trs}</table></div></div>""",
         "今日の勝負レース"
     )
+
+
+@app.post("/picks/toggle/<int:pid>")
+def toggle_pick_lock(pid):
+    with db() as con:
+        row = con.execute(
+            "SELECT * FROM picks WHERE id=? AND race_date=?",
+            (pid, today()),
+        ).fetchone()
+        if not row:
+            return redirect(url_for("picks", msg="対象の予想が見つかりませんでした。"))
+
+        if int(row["locked"] or 0) == 1:
+            con.execute(
+                "UPDATE picks SET locked=0, locked_at='' WHERE id=?",
+                (pid,),
+            )
+            msg = "固定を解除しました。次回の分析から3点候補が更新されます。"
+        else:
+            con.execute(
+                "UPDATE picks SET locked=1, locked_at=? WHERE id=?",
+                (now().strftime("%Y-%m-%d %H:%M:%S"), pid),
+            )
+            msg = "この3点を仮確定しました。再分析しても買い目は自動で変わりません。"
+
+    return redirect(url_for("picks", msg=msg))
+
+
+def _combo_from_saved_candidate(value):
+    m = re.match(r"^\s*(\d{1,2}-\d{1,2})", str(value or ""))
+    return m.group(1) if m else ""
+
+
+@app.post("/picks/apply/<int:pid>")
+def apply_locked_pick(pid):
+    with db() as con:
+        row = con.execute(
+            "SELECT * FROM picks WHERE id=? AND race_date=?",
+            (pid, today()),
+        ).fetchone()
+
+    if not row or int(row["locked"] or 0) != 1:
+        return redirect(url_for("picks", msg="固定済みの買い目が見つかりませんでした。"))
+
+    race_no = to_int(str(row["race"]).replace("R", ""), 0)
+    combos = [
+        _combo_from_saved_candidate(row["candidate1"]),
+        _combo_from_saved_candidate(row["candidate2"]),
+        _combo_from_saved_candidate(row["candidate3"]),
+    ]
+    combos = [x for x in combos if x]
+
+    if not combos:
+        return redirect(url_for("picks", msg="固定買い目を読み取れませんでした。"))
+
+    # 買い目は固定したまま、購入直前のオッズだけ最新値へ更新する。
+    try:
+        wide_data = nar_get_wide_odds(row["course"], race_no)
+    except Exception:
+        wide_data = []
+
+    wide_map = {x["combo"]: x for x in wide_data}
+    recs = []
+    for combo in combos:
+        w = wide_map.get(combo)
+        if w:
+            recs.append({
+                "combo": combo,
+                "low": float(w["low"]),
+                "high": float(w["high"]),
+                "display": w["display"],
+            })
+
+    if len(recs) != len(combos):
+        return redirect(url_for(
+            "picks",
+            msg="固定3点の最新オッズをすべて取得できませんでした。発売状況を確認してからもう一度お試しください。"
+        ))
+
+    allocation = allocate_amounts(row["grade"], recs, summary()["remaining"])
+    amounts = allocation["amounts"]
+
+    vals = {
+        "course": row["course"],
+        "race": row["race"],
+        "mode": row["mode"],
+    }
+    for i in range(1, 4):
+        if i <= len(recs):
+            vals[f"wide{i}"] = recs[i - 1]["combo"]
+            vals[f"odds{i}"] = recs[i - 1]["low"]
+            amt = amounts[i - 1] if i - 1 < len(amounts) else DEFAULT_BET
+            vals[f"amount{i}"] = max(100, int(amt or DEFAULT_BET))
+        else:
+            vals[f"wide{i}"] = ""
+            vals[f"odds{i}"] = 0
+            vals[f"amount{i}"] = 0
+
+    write_draft(vals)
+    return redirect(url_for(
+        "home",
+        msg="仮確定した3点を入力しました。買い目は固定のまま、最新オッズで購入額を再計算しています。"
+    ))
 
 
 @app.get("/history")
