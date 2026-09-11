@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-地方競馬ワイド投票管理 v50.1 - 予想検証自動記録版
+地方競馬ワイド投票管理 v50.2 - NAR結果自動照合版
 
 主な追加:
 - NAR公式サイトから当日のワイドオッズ・単勝/複勝データを取得
@@ -160,6 +160,27 @@ def init_db():
             UNIQUE(race_date, course, race, mode)
         )
         """)
+
+        validation_cols = {
+            r["name"] for r in con.execute(
+                "PRAGMA table_info(validation_predictions)"
+            ).fetchall()
+        }
+        if "checked_at" not in validation_cols:
+            con.execute(
+                "ALTER TABLE validation_predictions "
+                "ADD COLUMN checked_at TEXT DEFAULT ''"
+            )
+        if "result_source" not in validation_cols:
+            con.execute(
+                "ALTER TABLE validation_predictions "
+                "ADD COLUMN result_source TEXT DEFAULT ''"
+            )
+        if "official_wide" not in validation_cols:
+            con.execute(
+                "ALTER TABLE validation_predictions "
+                "ADD COLUMN official_wide TEXT DEFAULT ''"
+            )
 
 
 
@@ -340,6 +361,127 @@ def race_numbers(course):
             int(x) for x in re.findall(r"(?<!\d)(1[0-2]|[1-9])R(?!\d)", plain)
         }
     return sorted(nums)
+
+
+
+def normalize_wide_combo(combo):
+    """ワイド組番を 1-9 のように小さい馬番順へ統一する。"""
+    combo = clean_combo(combo)
+    m = re.fullmatch(r"\s*(\d{1,2})\s*-\s*(\d{1,2})\s*", combo)
+    if not m:
+        return ""
+    a, b = int(m.group(1)), int(m.group(2))
+    if a == b:
+        return ""
+    x, y = sorted((a, b))
+    return f"{x}-{y}"
+
+
+def nar_refund_url(course_name, race_no, race_date):
+    """指定日のNAR公式払戻ページURLを作る。"""
+    date_text = str(race_date or "").strip().replace("-", "/")
+    params = urllib.parse.urlencode({
+        "k_babaCode": NAR_COURSE_CODES[course_name],
+        "k_raceDate": date_text,
+        "k_raceNo": int(race_no),
+    })
+    return f"{NAR_BASE_URL}/RefundMoneyList?{params}"
+
+
+def parse_nar_wide_refunds(text):
+    """
+    NAR公式払戻ページからワイドの組番と100円あたり払戻金を抽出する。
+    例: {"1-9": 300, "2-9": 700, "1-2": 3160}
+    """
+    if not text:
+        return {}
+
+    # HTMLタグを落として、ワイド～三連複の区間だけを見る。
+    plain = re.sub(r"<script\\b[^>]*>.*?</script>", " ", text, flags=re.I | re.S)
+    plain = re.sub(r"<style\\b[^>]*>.*?</style>", " ", plain, flags=re.I | re.S)
+    plain = re.sub(r"<[^>]+>", " ", plain)
+    plain = plain.replace("&nbsp;", " ").replace("&#165;", "円")
+    plain = re.sub(r"\\s+", " ", plain)
+
+    m = re.search(
+        r"ワイド\\s+(.*?)(?=三連複|三連単|重勝|返還|特払|$)",
+        plain,
+        flags=re.S,
+    )
+    if not m:
+        return {}
+
+    segment = m.group(1)
+    combos = [
+        normalize_wide_combo(f"{a}-{b}")
+        for a, b in re.findall(
+            r"(?<!\\d)(\\d{1,2})\\s*[-－ー―]\\s*(\\d{1,2})(?!\\d)",
+            segment,
+        )
+    ]
+    payouts = [
+        int(x.replace(",", ""))
+        for x in re.findall(r"([\\d,]+)\\s*円", segment)
+    ]
+
+    # 通常ワイドは3組。余分な数字は使わず、対応できる分だけ採用。
+    result = {}
+    for combo, payout in zip(combos, payouts):
+        if combo and payout > 0:
+            result[combo] = payout
+        if len(result) >= 3:
+            break
+    return result
+
+
+def nar_get_wide_refunds(course_name, race_no, race_date):
+    """NAR公式から確定ワイド払戻を取得。未確定なら空dict。"""
+    if course_name not in NAR_COURSE_CODES:
+        return {}
+    try:
+        text = nar_fetch(
+            nar_refund_url(course_name, race_no, race_date),
+            timeout=15,
+        )
+    except Exception:
+        return {}
+    return parse_nar_wide_refunds(text)
+
+
+def settle_validation_row(row, refunds):
+    """
+    保存済み3点と公式ワイド払戻を照合する。
+    払戻金はNAR表示の100円あたり払戻 × 購入口数で計算。
+    """
+    if not refunds:
+        return None
+
+    total_return = 0
+    hit_details = []
+
+    for i in range(1, 4):
+        combo = normalize_wide_combo(row[f"candidate{i}"] or "")
+        if not combo or combo not in refunds:
+            continue
+
+        amount = int(row[f"amount{i}"] or 0)
+        payout100 = int(refunds[combo])
+        payout = int(round(payout100 * (amount / 100.0))) if amount > 0 else 0
+        total_return += payout
+        hit_details.append((combo, payout100, amount, payout))
+
+    result_text = "的中" if hit_details else "ハズレ"
+    official_text = " / ".join(
+        f"{combo} {payout:,}円"
+        for combo, payout in refunds.items()
+    )
+
+    return {
+        "result": result_text,
+        "return_amount": total_return,
+        "official_wide": official_text,
+        "hit_details": hit_details,
+    }
 
 
 def nar_get_wide_odds(course_name, race_no):
@@ -3344,6 +3486,10 @@ def course_batch():
 
 @app.get("/validation")
 def validation():
+    auto_updated = to_int(request.args.get("updated"), 0)
+    auto_pending = to_int(request.args.get("pending"), 0)
+    auto_errors = to_int(request.args.get("errors"), 0)
+
     with db() as con:
         rows = con.execute(
             "SELECT * FROM validation_predictions ORDER BY race_date DESC,id DESC"
@@ -3394,6 +3540,17 @@ def validation():
 
         status_class = "ok" if r["result"] == "的中" else ("bad" if r["result"] == "ハズレ" else "note")
         return_text = f'{int(r["return_amount"] or 0):,}円' if r["result"] == "的中" else ("0円" if r["result"] == "ハズレ" else "未確定")
+        official_wide = str(r["official_wide"] or "") if "official_wide" in r.keys() else ""
+        checked_at = str(r["checked_at"] or "") if "checked_at" in r.keys() else ""
+        result_source = str(r["result_source"] or "") if "result_source" in r.keys() else ""
+        official_html = (
+            f'<div class="small" style="margin-top:6px;">NAR公式ワイド払戻：{html.escape(official_wide)}</div>'
+            if official_wide else ""
+        )
+        checked_html = (
+            f'<div class="small">結果確認：{html.escape(checked_at)} ／ {html.escape(result_source)}</div>'
+            if checked_at else ""
+        )
 
         cards += f"""
         <div class="card">
@@ -3401,6 +3558,8 @@ def validation():
           <div class="small">記録 {html.escape(r["recorded_at"])} ／ {html.escape(r["mode"])} ／ グレード {html.escape(r["grade"])} ／ スコア {int(r["score"])} ／ 展開 {html.escape(r["pace"] or "不明")}</div>
           <div style="margin:10px 0;line-height:1.8;">{pick_html}</div>
           <div class="{status_class}">結果：{html.escape(r["result"])} ／ 払戻：{return_text} ／ 検証購入額：{int(r["total_bet"] or 0):,}円</div>
+          {official_html}
+          {checked_html}
           <form method="post" action="/validation/result/{int(r["id"])}">
             <div class="two">
               <div>
@@ -3421,16 +3580,29 @@ def validation():
         </div>
         """
 
+    auto_message = ""
+    if auto_updated or auto_pending or auto_errors:
+        auto_message = (
+            f'<div class="ok" style="margin-top:10px;">'
+            f'NAR公式結果を確認しました。更新 {auto_updated}件 ／ '
+            f'未確定 {auto_pending}件 ／ 取得失敗 {auto_errors}件'
+            f'</div>'
+        )
+
     body = f"""
     <div class="card">
       <div class="title">予想検証ダッシュボード</div>
+      <form method="post" action="/validation/auto-results" style="margin-bottom:12px;">
+        <button class="green">NAR公式から未確定結果を自動取得</button>
+      </form>
+      {auto_message}
       <div class="stats-grid">
         <div><span>記録数</span><strong>{total}</strong></div>
         <div><span>確定数</span><strong>{len(settled)}</strong></div>
         <div><span>的中率</span><strong>{hit_rate:.1f}%</strong></div>
         <div><span>回収率</span><strong>{recovery:.1f}%</strong></div>
       </div>
-      <div class="note" style="margin-top:10px;">予想を最初に表示した時点の3点・グレード・展開・オッズ・推奨額を固定保存します。同じレースを再予想しても上書きしません。回収率は検証購入額がある確定記録を集計します。</div>
+      <div class="note" style="margin-top:10px;">予想を最初に表示した時点の3点・グレード・展開・オッズ・推奨額を固定保存します。同じレースを再予想しても上書きしません。「NAR公式から未確定結果を自動取得」を押すと、確定済みワイド払戻と3点を照合し、的中・ハズレ・払戻額を自動更新します。回収率は検証購入額がある確定記録を集計します。</div>
       <div class="ok">検証収支：{profit:+,}円　／　検証購入額：{total_bet:,}円　／　払戻：{total_return:,}円</div>
     </div>
 
@@ -3442,6 +3614,76 @@ def validation():
     {cards if cards else '<div class="card"><div class="note">検証記録はまだありません。個別予想または全レース一括予想を実行すると自動記録されます。</div></div>'}
     """
     return page(body, "予想検証")
+
+
+@app.post("/validation/auto-results")
+def validation_auto_results():
+    with db() as con:
+        pending_rows = con.execute(
+            """
+            SELECT * FROM validation_predictions
+            WHERE result='未確定'
+            ORDER BY race_date ASC,id ASC
+            """
+        ).fetchall()
+
+    updated = 0
+    pending = 0
+    errors = 0
+
+    for row in pending_rows:
+        course = str(row["course"] or "")
+        race_match = re.search(r"(\d+)", str(row["race"] or ""))
+        if course not in NAR_COURSE_CODES or not race_match:
+            errors += 1
+            continue
+
+        race_no = int(race_match.group(1))
+        race_date = str(row["race_date"] or "")
+
+        try:
+            refunds = nar_get_wide_refunds(course, race_no, race_date)
+        except Exception:
+            errors += 1
+            continue
+
+        if not refunds:
+            # レース前・払戻未確定・NAR未掲載は未確定のまま。
+            pending += 1
+            continue
+
+        settled = settle_validation_row(row, refunds)
+        if not settled:
+            pending += 1
+            continue
+
+        checked = now().strftime("%Y-%m-%d %H:%M:%S")
+        with db() as con:
+            con.execute(
+                """
+                UPDATE validation_predictions
+                SET result=?, return_amount=?, checked_at=?,
+                    result_source='NAR公式', official_wide=?
+                WHERE id=? AND result='未確定'
+                """,
+                (
+                    settled["result"],
+                    int(settled["return_amount"]),
+                    checked,
+                    settled["official_wide"],
+                    int(row["id"]),
+                ),
+            )
+        updated += 1
+
+    return redirect(
+        url_for(
+            "validation",
+            updated=updated,
+            pending=pending,
+            errors=errors,
+        )
+    )
 
 
 @app.post("/validation/result/<int:vid>")
@@ -3461,8 +3703,17 @@ def validation_result(vid):
 
     with db() as con:
         con.execute(
-            "UPDATE validation_predictions SET result=?,return_amount=? WHERE id=?",
-            (result_text, ret, vid),
+            """
+            UPDATE validation_predictions
+            SET result=?,return_amount=?,checked_at=?,result_source='手入力'
+            WHERE id=?
+            """,
+            (
+                result_text,
+                ret,
+                now().strftime("%Y-%m-%d %H:%M:%S"),
+                vid,
+            ),
         )
     return redirect(url_for("validation"))
 
