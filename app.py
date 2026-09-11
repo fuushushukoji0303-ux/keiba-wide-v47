@@ -420,11 +420,11 @@ def _record_stats(text, label):
     }
 
 
-def nar_get_form_data(course_name, race_no):
+def nar_get_form_data(course_name, race_no, horses=None):
     """
-    NAR公式のPC版出馬表(DebaTable)から、近走着順・当該競馬場成績・距離成績を取得。
-    通常のnar_fetchはiPhone User-Agentなので、出馬表だけPC向けUAで取得する。
-    取得できない場合は空dictを返し、既存の予想ロジックには影響させない。
+    NAR公式の出馬表から、近走着順・当該競馬場成績・距離成績を取得。
+    DebaTableは入れ子の表が多いため、通常のtable行解析ではなく、
+    馬名を目印にプレーンテキスト化した出馬表から各馬の範囲を切り出す。
     """
     url = nar_url("DebaTable", course_name, race_no)
     req = urllib.request.Request(
@@ -441,60 +441,83 @@ def nar_get_form_data(course_name, race_no):
     with urllib.request.urlopen(req, timeout=15) as res:
         raw = res.read()
 
-    text = None
+    page_text = None
     for enc in ("utf-8", "cp932", "shift_jis"):
         try:
-            text = raw.decode(enc)
+            page_text = raw.decode(enc)
             break
         except UnicodeDecodeError:
             pass
-    if text is None:
-        text = raw.decode("utf-8", errors="replace")
-    parser = SimpleTableParser()
-    parser.feed(text)
+    if page_text is None:
+        page_text = raw.decode("utf-8", errors="replace")
+
+    # script/styleを除き、HTML全体を読みやすいプレーンテキストへ
+    plain = re.sub(r"(?is)<script.*?</script>", " ", page_text)
+    plain = re.sub(r"(?is)<style.*?</style>", " ", plain)
+    plain = re.sub(r"(?is)<br\s*/?>", " ", plain)
+    plain = re.sub(r"(?is)<[^>]+>", " ", plain)
+    plain = html.unescape(plain)
+    plain = plain.replace("\xa0", " ")
+    plain = " ".join(plain.split())
+
     result = {}
 
-    for row in parser.rows:
-        if not row:
+    # 既に単勝・複勝ページから取得できている馬名をアンカーとして使う。
+    horse_list = list(horses or [])
+    positions = []
+    for h in horse_list:
+        name = str(h.get("horse_name") or "").strip()
+        if not name:
             continue
-        cells = [str(x).strip() for x in row]
-        joined = " ".join(cells).replace("\xa0", " ")
+        pos = plain.find(name)
+        if pos >= 0:
+            positions.append((pos, int(h["horse_no"]), name))
 
-        # 出走馬の行は「全」「場」「距」などの着別成績を含む
-        if "全" not in joined or ("場" not in joined and "距" not in joined):
-            continue
+    positions.sort()
 
-        horse_no = None
-        # NAR出馬表では通常 row[1] が馬番。崩れた場合に備えて先頭3セルも確認。
-        for pos in (1, 0, 2, 3):
-            if pos < len(cells):
-                s = cells[pos].replace(" ", "")
-                if re.fullmatch(r"\d{1,2}", s):
-                    n = int(s)
-                    if 1 <= n <= 16:
-                        horse_no = n
-                        break
-        if horse_no is None:
-            continue
+    for i, (pos, horse_no, name) in enumerate(positions):
+        # 次の馬名までをこの馬のブロックとして扱う
+        next_pos = positions[i + 1][0] if i + 1 < len(positions) else min(len(plain), pos + 5000)
+        block = plain[pos:next_pos]
 
-        track = _record_stats(joined, "場")
-        distance = _record_stats(joined, "距")
+        track = _record_stats(block, "場")
+        distance = _record_stats(block, "距")
 
         recent = []
-        # 前走～5走前のセルは「着順 日付 ...」で始まることが多い
-        for cell in cells:
-            m = re.match(r"^\s*(\d{1,2})\s+\d{2}\.\d{2}\.\d{2}\b", cell)
-            if m:
-                recent.append(int(m.group(1)))
-        recent = recent[:5]
+
+        # PC版出馬表: 「4 26.08.28 不良 9頭」のような形式
+        for m in re.finditer(
+            r"(?:^|\s)(\d{1,2})\s+(\d{2}\.\d{2}\.\d{2})\s+"
+            r"(?:良|稍重|重|不良|稍|晴|曇|雨|雪)",
+            block,
+        ):
+            finish = int(m.group(1))
+            if 1 <= finish <= 30:
+                recent.append(finish)
+            if len(recent) >= 5:
+                break
+
+        # 表記違いへの予備パターン
+        if not recent:
+            for m in re.finditer(
+                r"(?:^|\s)(\d{1,2})\s*/\s*\d{1,2}\s+"
+                r"\d+人",
+                block,
+            ):
+                finish = int(m.group(1))
+                if 1 <= finish <= 30:
+                    recent.append(finish)
+                if len(recent) >= 5:
+                    break
 
         result[horse_no] = {
-            "recent_finishes": recent,
+            "recent_finishes": recent[:5],
             "track": track,
             "distance": distance,
         }
 
     return result
+
 
 
 def form_data_panel(horses, form_data):
@@ -1960,7 +1983,7 @@ def analyze():
 
     # v49 Step1: 近走・競馬場・距離適性の取得確認。失敗時も従来予想を継続。
     try:
-        form_data = nar_get_form_data(course, race)
+        form_data = nar_get_form_data(course, race, horse_data)
     except Exception:
         form_data = {}
 
