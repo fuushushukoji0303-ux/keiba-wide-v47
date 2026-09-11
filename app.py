@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-地方競馬ワイド投票管理 v49.5.2 - 騎手短縮名対応版
+地方競馬ワイド投票管理 v49.6 - 騎手評価控えめ反映版
 
 主な追加:
 - NAR公式サイトから当日のワイドオッズ・単勝/複勝データを取得
@@ -579,11 +579,45 @@ def horse_form_rating(form):
     return round(sum(v * w for v, w in parts) / weight_sum, 1)
 
 
+
+def jockey_rating(form):
+    """
+    騎手の当年勝率・連対率を0〜100点へ換算。
+    ワイド向けなので連対率をやや重視。
+    データなしは50点（中立）、騎乗数が少ない場合は50点側へ縮める。
+    """
+    if not form:
+        return 50.0
+    js = form.get("jockey_stats")
+    if not js:
+        return 50.0
+
+    win_rate = js.get("win_rate")
+    quinella_rate = js.get("quinella_rate")
+    if win_rate is None and quinella_rate is None:
+        return 50.0
+
+    parts = []
+    if win_rate is not None:
+        win_score = max(0.0, min(100.0, 50.0 + (float(win_rate) - 10.0) * 3.0))
+        parts.append((win_score, 0.35))
+    if quinella_rate is not None:
+        quinella_score = max(0.0, min(100.0, 50.0 + (float(quinella_rate) - 20.0) * 1.5))
+        parts.append((quinella_score, 0.65))
+
+    raw = sum(v * w for v, w in parts) / sum(w for _, w in parts)
+    total = max(0.0, float(js.get("total") or 0))
+    sample_weight = min(1.0, total / 50.0)
+    return round(50.0 + (raw - 50.0) * sample_weight, 1)
+
+
 def apply_form_ratings(horses, form_data):
     """各馬へ実績評価点を付加。データが無い馬は50点の中立。"""
     form_data = form_data or {}
     for h in horses:
-        h["form_rating"] = horse_form_rating(form_data.get(int(h["horse_no"])))
+        f = form_data.get(int(h["horse_no"]))
+        h["form_rating"] = horse_form_rating(f)
+        h["jockey_rating"] = jockey_rating(f)
     return horses
 
 
@@ -693,6 +727,7 @@ def form_data_panel(horses, form_data):
         jockey_text=(f'{jockey}（{f.get("jockey_affiliation","")}）' if jockey!="取得なし" else jockey)
         win_text=(f'{js["win_rate"]:.1f}%' if js and js.get("win_rate") is not None else "取得なし")
         quinella_text=(f'{js["quinella_rate"]:.1f}%' if js and js.get("quinella_rate") is not None else "取得なし")
+        jockey_rating_text=f"{jockey_rating(f):.1f}"
 
         track = f.get("track")
         distance = f.get("distance")
@@ -713,7 +748,8 @@ def form_data_panel(horses, form_data):
             f"<td>{html.escape(distance_text)}</td>"
             f"<td><strong>{form_rating:.1f}</strong></td>"
             f"<td>{html.escape(jockey_text)}</td><td>{html.escape(win_text)}</td>"
-            f"<td>{html.escape(quinella_text)}</td></tr>"
+            f"<td>{html.escape(quinella_text)}</td>"
+            f"<td><strong>{html.escape(jockey_rating_text)}</strong></td></tr>"
         )
 
     if not rows:
@@ -726,10 +762,10 @@ def form_data_panel(horses, form_data):
     return f"""
     <div class="card">
       <div class="title">精度アップ用データ取得状況</div>
-      <div class="ok">近走・競馬場適性・距離適性を {matched}頭分取得しました。騎手成績は取得確認段階で、まだ予想順位には反映していません。</div>
+      <div class="ok">近走・競馬場適性・距離適性を {matched}頭分取得しました。騎手成績はワイド向けに連対率をやや重視し、予想へ控えめに反映しています。</div>
       <div class="scroll">
         <table>
-          <tr><th>馬番</th><th>馬名</th><th>近5走着順</th><th>競馬場 複勝率</th><th>距離 複勝率</th><th>実績評価</th><th>騎手</th><th>騎手 勝率</th><th>騎手 連対率</th></tr>
+          <tr><th>馬番</th><th>馬名</th><th>近5走着順</th><th>競馬場 複勝率</th><th>距離 複勝率</th><th>実績評価</th><th>騎手</th><th>騎手 勝率</th><th>騎手 連対率</th><th>騎手評価</th></tr>
           {rows}
         </table>
       </div>
@@ -759,9 +795,23 @@ def select_three_by_mode(horses, wide_data, mode, form_data=None):
             + float(partner.get("form_rating", 50.0))
         ) / 2.0
         form_adjust = max(-0.8, min(0.8, (pair_form - 50.0) / 50.0 * 0.8))
-        adjusted_score = score - form_adjust
+
+        # v49.6: 騎手評価は最大±0.35点だけ反映。
+        # 既存のオッズ評価・実績評価を主役のまま維持する。
+        pair_jockey = (
+            float(axis.get("jockey_rating", 50.0))
+            + float(partner.get("jockey_rating", 50.0))
+        ) / 2.0
+        jockey_adjust = max(
+            -0.35, min(0.35, (pair_jockey - 50.0) / 50.0 * 0.35)
+        )
+
+        adjusted_score = score - form_adjust - jockey_adjust
         confidence = max(1, min(99, int(round(100 - adjusted_score * 5))))
-        reason = f"{reason}／実績評価 {pair_form:.1f}点"
+        reason = (
+            f"{reason}／実績評価 {pair_form:.1f}点"
+            f"／騎手評価 {pair_jockey:.1f}点"
+        )
         candidates.append((adjusted_score, axis, partner, wide, confidence, reason))
 
     if mode == "堅め":
@@ -2829,6 +2879,7 @@ def course_batch():
                 return race_no, "skip", "単勝・複勝未発売・取得不可", None
             try:
                 form_data = nar_get_form_data(course, race_no, horse_data)
+                attach_jockey_stats(form_data)
             except Exception:
                 form_data = {}
             return race_no, "ok", "", evaluate_race_rank(
