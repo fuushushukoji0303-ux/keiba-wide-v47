@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-地方競馬ワイド投票管理 v49.9 - 脚質展開控えめ反映版
+地方競馬ワイド投票管理 v50.0 - 展開予測詳細版
 
 主な追加:
 - NAR公式サイトから当日のワイドオッズ・単勝/複勝データを取得
@@ -717,6 +717,79 @@ def predict_race_pace(form_data):
 
 
 
+
+def build_race_scenario(form_data, horse_data):
+    """
+    脚質・過去走通過順から、レースの展開イメージを文章化する。
+    予想スコアの重みはv49.9のまま変更しない。
+    """
+    name_map = {}
+    for h in (horse_data or []):
+        try:
+            no = int(h.get("horse_no"))
+        except Exception:
+            continue
+        name_map[no] = str(h.get("horse_name") or f"{no}番")
+
+    rows = []
+    for no, f in (form_data or {}).items():
+        try:
+            horse_no = int(no)
+        except Exception:
+            continue
+        f = f or {}
+        style = f.get("running_style") or "取得なし"
+        conf = float(f.get("style_confidence") or 0.0)
+        corners = f.get("corner_histories") or []
+
+        # 直近の前半位置を使って、逃げ・先行候補の優先度を作る。
+        first_positions = [seq[0] for seq in corners if seq]
+        avg_first = (
+            sum(first_positions) / len(first_positions)
+            if first_positions else 99.0
+        )
+
+        rows.append({
+            "horse_no": horse_no,
+            "horse_name": name_map.get(horse_no, f"{horse_no}番"),
+            "style": style,
+            "confidence": conf,
+            "avg_first": avg_first,
+        })
+
+    # 前へ行く可能性が高い順
+    style_order = {"逃げ": 0, "先行": 1, "差し": 2, "追込": 3, "取得なし": 9}
+    rows.sort(key=lambda x: (style_order.get(x["style"], 9), x["avg_first"], -x["confidence"]))
+
+    leaders = [r for r in rows if r["style"] == "逃げ"][:3]
+    stalkers = [r for r in rows if r["style"] == "先行"][:4]
+    closers = [r for r in rows if r["style"] in ("差し", "追込")][:4]
+
+    def fmt(items):
+        if not items:
+            return "該当なし"
+        return "、".join(f'{r["horse_no"]}番 {r["horse_name"]}' for r in items)
+
+    pace = predict_race_pace(form_data).get("pace", "判定不能")
+
+    if pace == "ハイペース寄り":
+        flow = "前半から先行争いが強くなりやすく、直線では差し勢の浮上に注意。"
+    elif pace == "スローペース寄り":
+        flow = "前半は落ち着きやすく、逃げ・先行勢の前残りに注意。"
+    elif pace == "平均ペース":
+        flow = "極端な流れになりにくく、位置取りと直線の伸びが重要。"
+    else:
+        flow = "脚質データが不足しているため、展開予測は参考程度。"
+
+    return {
+        "pace": pace,
+        "leaders": fmt(leaders),
+        "stalkers": fmt(stalkers),
+        "closers": fmt(closers),
+        "flow": flow,
+    }
+
+
 def pace_fit_value(style, pace):
     """
     展開と脚質の相性を -1.0〜+1.0 で返す。
@@ -956,6 +1029,7 @@ def form_data_panel(horses, form_data):
         )
 
     pace_info = predict_race_pace(form_data)
+    scenario = build_race_scenario(form_data, horse_data)
     pace_name = html.escape(str(pace_info.get("pace", "判定不能")))
     pace_comment = html.escape(str(pace_info.get("comment", "")))
     pace_counts = html.escape(
@@ -975,7 +1049,13 @@ def form_data_panel(horses, form_data):
         <div style="font-size:1.08em;"><strong>{pace_name}</strong></div>
         <div style="margin-top:4px;">{pace_counts}</div>
         <div style="margin-top:4px;">{pace_comment}</div>
-        <div style="margin-top:5px;font-size:0.85em;">※ 脚質と展開の補正は最大±0.30点に抑えています。</div>
+        <div style="margin-top:9px;padding-top:8px;border-top:1px dashed #cfd8dc;">
+          <div><strong>逃げ候補：</strong>{html.escape(str(scenario.get("leaders", "該当なし")))}</div>
+          <div style="margin-top:3px;"><strong>先行候補：</strong>{html.escape(str(scenario.get("stalkers", "該当なし")))}</div>
+          <div style="margin-top:3px;"><strong>差し・追込候補：</strong>{html.escape(str(scenario.get("closers", "該当なし")))}</div>
+          <div style="margin-top:6px;"><strong>想定される流れ：</strong>{html.escape(str(scenario.get("flow", "")))}</div>
+        </div>
+        <div style="margin-top:7px;font-size:0.85em;">※ 展開予測を詳しく表示しますが、予想補正はv49.9と同じ最大±0.30点のままです。</div>
       </div>
 
       <div class="scroll">
