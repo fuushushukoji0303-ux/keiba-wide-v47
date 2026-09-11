@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-地方競馬ワイド投票管理 v48.1 - 会員ログイン準備版
+地方競馬ワイド投票管理 v49.3 - 実績データ控えめ反映版
 
 主な追加:
 - NAR公式サイトから当日のワイドオッズ・単勝/複勝データを取得
@@ -520,13 +520,62 @@ def nar_get_form_data(course_name, race_no, horses=None):
 
 
 
+
+def horse_form_rating(form):
+    """
+    近5走・競馬場複勝率・距離複勝率を0〜100点にまとめる。
+    データ不足は50点（中立）扱い。サンプルが少ない適性値は50点側へ縮める。
+    """
+    if not form:
+        return 50.0
+
+    parts = []
+
+    recent = list(form.get("recent_finishes") or [])[:5]
+    if recent:
+        weights = [1.40, 1.25, 1.10, 1.00, 0.90][:len(recent)]
+        vals = [max(0.0, 100.0 - (max(1, int(f)) - 1) * 12.0) for f in recent]
+        recent_score = sum(v * w for v, w in zip(vals, weights)) / sum(weights)
+        parts.append((recent_score, 0.50))
+
+    def adjusted_rate(stat):
+        if not stat or stat.get("top3_rate") is None:
+            return None
+        rate = max(0.0, min(100.0, float(stat["top3_rate"])))
+        total = max(0, int(stat.get("total") or 0))
+        sample_weight = min(1.0, total / 10.0)
+        return 50.0 + (rate - 50.0) * sample_weight
+
+    track_score = adjusted_rate(form.get("track"))
+    if track_score is not None:
+        parts.append((track_score, 0.25))
+
+    distance_score = adjusted_rate(form.get("distance"))
+    if distance_score is not None:
+        parts.append((distance_score, 0.25))
+
+    if not parts:
+        return 50.0
+
+    weight_sum = sum(w for _, w in parts)
+    return round(sum(v * w for v, w in parts) / weight_sum, 1)
+
+
+def apply_form_ratings(horses, form_data):
+    """各馬へ実績評価点を付加。データが無い馬は50点の中立。"""
+    form_data = form_data or {}
+    for h in horses:
+        h["form_rating"] = horse_form_rating(form_data.get(int(h["horse_no"])))
+    return horses
+
+
 def form_data_panel(horses, form_data):
-    """取得確認用。予想ロジックにはまだ反映しない。"""
+    """取得した実績データと実績評価点を表示。"""
     if not form_data:
         return (
             '<div class="card"><div class="title">精度アップ用データ取得状況</div>'
             '<div class="note">近走・競馬場適性・距離適性データは取得できませんでした。'
-            '現在の予想ロジックは従来どおり動作しています。</div></div>'
+            '取得できない項目は中立評価として扱い、従来のオッズ中心ロジックを優先します。</div></div>'
         )
 
     by_no = {int(h["horse_no"]): h for h in horses}
@@ -541,6 +590,7 @@ def form_data_panel(horses, form_data):
         f = form_data[horse_no]
 
         recent = f.get("recent_finishes") or []
+        form_rating = horse_form_rating(f)
         recent_text = "・".join(str(x) for x in recent) if recent else "取得なし"
 
         track = f.get("track")
@@ -559,7 +609,8 @@ def form_data_panel(horses, form_data):
             f"<td>{html.escape(str(h.get('horse_name','')))}</td>"
             f"<td>{html.escape(recent_text)}</td>"
             f"<td>{html.escape(track_text)}</td>"
-            f"<td>{html.escape(distance_text)}</td></tr>"
+            f"<td>{html.escape(distance_text)}</td>"
+            f"<td><strong>{form_rating:.1f}</strong></td></tr>"
         )
 
     if not rows:
@@ -572,10 +623,10 @@ def form_data_panel(horses, form_data):
     return f"""
     <div class="card">
       <div class="title">精度アップ用データ取得状況</div>
-      <div class="ok">近走・競馬場適性・距離適性を {matched}頭分取得しました。現在は確認段階で、まだ予想順位には反映していません。</div>
+      <div class="ok">近走・競馬場適性・距離適性を {matched}頭分取得しました。実績評価は予想へ控えめに反映しています。</div>
       <div class="scroll">
         <table>
-          <tr><th>馬番</th><th>馬名</th><th>近5走着順</th><th>競馬場 複勝率</th><th>距離 複勝率</th></tr>
+          <tr><th>馬番</th><th>馬名</th><th>近5走着順</th><th>競馬場 複勝率</th><th>距離 複勝率</th><th>実績評価</th></tr>
           {rows}
         </table>
       </div>
@@ -588,18 +639,27 @@ def make_pair_key(a, b):
     return f"{first}-{second}"
 
 
-def select_three_by_mode(horses, wide_data, mode):
+def select_three_by_mode(horses, wide_data, mode, form_data=None):
     """PC版v44の3点候補ルールをスマホ向けに移植。"""
     if len(horses) < 3 or not wide_data:
         return []
 
+    apply_form_ratings(horses, form_data)
     wide_map = {item["combo"]: item for item in wide_data}
     ranked = sorted(horses, key=lambda h: h["market_rank"])
     candidates = []
 
     def add_candidate(axis, partner, wide, score, reason):
-        confidence = max(1, min(99, int(round(100 - score * 5))))
-        candidates.append((score, axis, partner, wide, confidence, reason))
+        # v49.3: 実績補正は最大±0.8点だけ。従来のオッズ評価を主役にする。
+        pair_form = (
+            float(axis.get("form_rating", 50.0))
+            + float(partner.get("form_rating", 50.0))
+        ) / 2.0
+        form_adjust = max(-0.8, min(0.8, (pair_form - 50.0) / 50.0 * 0.8))
+        adjusted_score = score - form_adjust
+        confidence = max(1, min(99, int(round(100 - adjusted_score * 5))))
+        reason = f"{reason}／実績評価 {pair_form:.1f}点"
+        candidates.append((adjusted_score, axis, partner, wide, confidence, reason))
 
     if mode == "堅め":
         axis = ranked[0]
@@ -775,8 +835,8 @@ def add_priority_scores(recommendations):
     return recommendations
 
 
-def evaluate_race_rank(horses, wide_data, mode, remaining_budget):
-    recommendations = select_three_by_mode(horses, wide_data, mode)
+def evaluate_race_rank(horses, wide_data, mode, remaining_budget, form_data=None):
+    recommendations = select_three_by_mode(horses, wide_data, mode, form_data)
 
     if len(recommendations) < 3:
         return {
@@ -1987,7 +2047,7 @@ def analyze():
     except Exception:
         form_data = {}
 
-    result = evaluate_race_rank(horse_data, wide_data, mode, summary()["remaining"])
+    result = evaluate_race_rank(horse_data, wide_data, mode, summary()["remaining"], form_data)
     save_pick(course, race, mode, result)
     recs = result["recommendations"][:3]
     allocation = allocate_amounts(result["grade"], recs, summary()["remaining"])
@@ -2041,7 +2101,7 @@ def analyze():
       <div class="grade">{html.escape(result["grade"])}</div>
       <div class="score">参考スコア {result["score"]} / 100</div>
       <ul>{reasons}</ul>
-      <div class="small">※これは的中確率ではありません。現在の判定は従来どおり市場オッズ中心です。上の実績データは取得確認段階で、まだ順位には反映していません。</div>
+      <div class="small">※これは的中確率ではありません。市場オッズを中心に、近走・競馬場・距離実績を控えめに補正しています。</div>
     </div>
 
     <div class="card">
@@ -2505,7 +2565,13 @@ def course_batch():
                 return race_no, "skip", "ワイド未発売・取得不可", None
             if not horse_data:
                 return race_no, "skip", "単勝・複勝未発売・取得不可", None
-            return race_no, "ok", "", evaluate_race_rank(horse_data, wide_data, mode, remaining)
+            try:
+                form_data = nar_get_form_data(course, race_no, horse_data)
+            except Exception:
+                form_data = {}
+            return race_no, "ok", "", evaluate_race_rank(
+                horse_data, wide_data, mode, remaining, form_data
+            )
         except Exception as exc:
             return race_no, "error", f"{type(exc).__name__}: {exc}", None
 
