@@ -36,7 +36,6 @@ JST = timezone(timedelta(hours=9))
 APP_TITLE = "パカおとパカ美のワクワク競馬"
 DAILY_LIMIT = 3000
 DEFAULT_BET = 300
-SPAT4_URL = "https://www.spat4.jp/keiba/pc"
 NAR_BASE_URL = "https://www.keiba.go.jp/KeibaWeb/TodayRaceInfo"
 
 BRAND_SUBTITLE = "地方競馬 ワイド3点予想・購入管理"
@@ -3380,7 +3379,6 @@ def home():
         <div class="note">想定払戻・損益は保存された基準オッズによる参考計算です。実際の払戻は締切時の最終オッズで変わります。</div>
         <div class="actions">
         <form method="post" action="/record"><button class="green">SPAT4で購入後、この内容を購入記録</button></form>
-        <a class="btn" href="{SPAT4_URL}" target="_blank" rel="noopener">SPAT4公式サイトを開く</a>
         </div></div>"""
 
     opts = "".join(
