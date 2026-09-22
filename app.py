@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-地方競馬ワイド投票管理 v51.3 - 最新承認イメージ版
+地方競馬ワイド投票管理 v51.3.2 - 発走時刻表示版
 
 主な追加:
 - NAR公式サイトから当日のワイドオッズ・単勝/複勝データを取得
@@ -4371,12 +4371,14 @@ def course_batch():
 
     def worker(race_no):
         try:
+            start_dt = nar_get_race_start_time(course, race_no)
+            start_text = start_dt.strftime("%H:%M") if start_dt else "--:--"
             wide_data = nar_get_wide_odds(course, race_no)
             horse_data = nar_get_horse_market(course, race_no)
             if not wide_data:
-                return race_no, "skip", "ワイド未発売・取得不可", None
+                return race_no, "skip", "ワイド未発売・取得不可", None, start_text
             if not horse_data:
-                return race_no, "skip", "単勝・複勝未発売・取得不可", None
+                return race_no, "skip", "単勝・複勝未発売・取得不可", None, start_text
             try:
                 form_data = nar_get_form_data(course, race_no, horse_data)
                 attach_jockey_stats(form_data)
@@ -4389,28 +4391,28 @@ def course_batch():
             result["_baseline_result"] = evaluate_race_rank_baseline(
                 horse_data, wide_data, mode, remaining
             )
-            return race_no, "ok", "", result
+            return race_no, "ok", "", result, start_text
         except Exception as exc:
-            return race_no, "error", f"{type(exc).__name__}: {exc}", None
+            return race_no, "error", f"{type(exc).__name__}: {exc}", None, "--:--"
 
     fetched = {}
     with ThreadPoolExecutor(max_workers=min(4, max(1, len(races)))) as pool:
         futures = [pool.submit(worker, r) for r in races]
         for f in as_completed(futures):
-            race_no, status, message, result = f.result()
-            fetched[race_no] = (status, message, result)
+            race_no, status, message, result, start_text = f.result()
+            fetched[race_no] = (status, message, result, start_text)
 
     cards = ""
     analyzed = 0
     good = 0
 
     for race_no in races:
-        status, message, result = fetched.get(race_no, ("error", "取得できませんでした", None))
+        status, message, result, start_text = fetched.get(race_no, ("error", "取得できませんでした", None, "--:--"))
         detail_url = html.escape(url_for("analyze", course=course, race=race_no, mode=mode, auto=1), quote=True)
 
         if status != "ok" or not result:
             cards += f"""<div class="batch-card">
-              <div class="batch-top"><div class="batch-race">{race_no}R</div><span class="batch-grade">－</span></div>
+              <div class="batch-top"><div class="batch-race">{race_no}R　発走 {html.escape(start_text)}</div><span class="batch-grade">－</span></div>
               <div class="batch-meta">{html.escape(message)}</div>
               <a class="btn secondary" href="{detail_url}">このレースを確認</a>
             </div>"""
@@ -4437,7 +4439,7 @@ def course_batch():
         ) or "3点候補なし"
 
         cards += f"""<div class="batch-card {'good' if grade in ('S+','S','S-','A') else ''}">
-          <div class="batch-top"><div class="batch-race">{race_no}R</div><span class="batch-grade">{html.escape(grade)}</span></div>
+          <div class="batch-top"><div class="batch-race">{race_no}R　発走 {html.escape(start_text)}</div><span class="batch-grade">{html.escape(grade)}</span></div>
           <div class="batch-meta">参考スコア {int(result["score"])} / {html.escape(mode)}モード</div>
           <div class="batch-picks">{picks}</div>
           <a class="btn {'green' if grade in ('S+','S','S-','A') else 'secondary'}" href="{detail_url}">詳しい予想・購入額を見る</a>
