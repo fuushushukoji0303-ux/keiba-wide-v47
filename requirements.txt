@@ -1,2 +1,6 @@
 Flask>=3.0,<4
 gunicorn>=22,<24
+requests>=2.31,<3
+pandas>=2.0,<3
+beautifulsoup4>=4.12,<5
+lxml>=5.0,<7
