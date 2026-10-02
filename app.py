@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-地方競馬ワイド投票管理 v51.4.4 - 3部門一致能力指数軸固定版
+地方競馬ワイド投票管理 v52.0 - 能力指数完全統合版
 
 主な追加:
 - NAR公式サイトから当日のワイドオッズ・単勝/複勝データを取得
@@ -31,6 +31,14 @@ from html.parser import HTMLParser
 from pathlib import Path
 
 from flask import Flask, request, redirect, url_for, session
+
+# v52.0 能力指数ソフト Ver1.0.1 のロジックを統合
+try:
+    from ability_engine import calculate_ability_indices
+    ABILITY_ENGINE_IMPORT_ERROR = ""
+except Exception as _ability_import_exc:
+    calculate_ability_indices = None
+    ABILITY_ENGINE_IMPORT_ERROR = f"{type(_ability_import_exc).__name__}: {_ability_import_exc}"
 
 JST = timezone(timedelta(hours=9))
 APP_TITLE = "パカおとパカ美のワクワク競馬"
@@ -3505,10 +3513,10 @@ def analyze():
     </div><br>
     <div><label>予想モード</label><select name="mode">{mode_opts}</select></div><br>
     <div>
-      <label>★3部門一致 能力指数軸（馬番）</label>
+      <label>能力指数軸 手動上書き（通常は空欄でOK）</label>
       <input name="ability_axis" inputmode="numeric" value="{ability_axis if ability_axis else ''}"
-             placeholder="例 9　3部門一致がないレースは空欄">
-      <div class="small">総合1位・複勝1位・ワイド軸1位が同じ馬の馬番を入力すると、3点すべてをその馬から流します。</div>
+             placeholder="自動判定を使う場合は空欄">
+      <div class="small">v52.0では総合・複勝・ワイド軸指数を自動計算し、3部門1位が一致した馬を自動で軸にします。ここは確認用の手動上書き欄です。</div>
     </div><br>
     <button class="green">ワイドオッズ取得 → 3点予想</button>
     </form></div>"""
@@ -3548,6 +3556,25 @@ def analyze():
         attach_jockey_stats(form_data)
     except Exception:
         form_data = {}
+
+    # v52.0: 能力指数Ver1.0.1のロジックをこのワイド版の中で自動計算。
+    # 手動入力があれば確認用の上書きとして優先。通常は空欄で自動運用。
+    manual_ability_axis = ability_axis
+    ability_result = None
+    ability_rows = []
+    ability_error = ""
+    auto_ability_axis = 0
+    if calculate_ability_indices is None:
+        ability_error = "能力指数エンジンを読み込めません: " + ABILITY_ENGINE_IMPORT_ERROR
+    else:
+        try:
+            ability_result = calculate_ability_indices(course, race, nar_date_text())
+            ability_rows = ability_result.get("rows", [])
+            auto_ability_axis = to_int(ability_result.get("triple_axis", 0), 0)
+        except Exception as exc:
+            ability_error = f"{type(exc).__name__}: {exc}"
+
+    ability_axis = manual_ability_axis or auto_ability_axis
 
     remaining_budget = summary()["remaining"]
     result = evaluate_race_rank(
@@ -3605,6 +3632,43 @@ def analyze():
         for x in wide_data[:50]
     )
 
+    # v52.0 能力指数一覧。能力指数ソフトと同じ3指数・順位を表示。
+    ability_panel = ""
+    if ability_rows:
+        ar = ""
+        for x in ability_rows:
+            triple_mark = "★" if (x.get("rank_total") == 1 and x.get("rank_place") == 1 and x.get("rank_wide") == 1) else ""
+            row_class = ' class="rank1"' if triple_mark else ""
+            ar += (
+                f'<tr{row_class}><td>{x.get("horse_no", "")}</td>'
+                f'<td>{html.escape(str(x.get("horse_name", "")))}</td>'
+                f'<td>{x.get("rank_total", "")}位 / {x.get("total", "")}</td>'
+                f'<td>{x.get("rank_place", "")}位 / {x.get("place", "")}</td>'
+                f'<td>{x.get("rank_wide", "")}位 / {x.get("wide", "")}</td>'
+                f'<td>{x.get("recent", "")}</td><td>{x.get("course", "")}</td>'
+                f'<td>{x.get("distance", "")}</td><td>{x.get("stability", "")}</td>'
+                f'<td><strong>{triple_mark}</strong></td></tr>'
+            )
+        if auto_ability_axis:
+            top = next((x for x in ability_rows if to_int(x.get("horse_no"),0) == auto_ability_axis), {})
+            auto_note = (
+                '<div class="ok"><strong>★3部門一致を自動検出：</strong>'
+                + html.escape(str(auto_ability_axis)) + '番 '
+                + html.escape(str(top.get("horse_name", "")))
+                + '<br><span class="small">この馬をワイド3点の軸へ自動設定しました。</span></div>'
+            )
+        else:
+            auto_note = '<div class="note">このレースは3部門1位の完全一致なし。従来ワイドロジックで3点を選びます。</div>'
+        leading_note = html.escape(str((ability_result or {}).get("leading_status", "")))
+        ability_panel = f'''<div class="card">
+          <div class="title">全馬能力指数　v52.0 自動計算</div>
+          {auto_note}
+          <div class="small">既存能力指数ソフトVer1.0.1と同じ配点。オッズ・人気は指数計算に使用しません。{leading_note}</div>
+          <div class="scroll"><table><tr><th>馬番</th><th>馬名</th><th>総合</th><th>複勝</th><th>ワイド軸</th><th>近5走</th><th>競馬場</th><th>距離</th><th>安定</th><th>一致</th></tr>{ar}</table></div>
+        </div>'''
+    elif ability_error:
+        ability_panel = '<div class="bad"><strong>能力指数の自動計算だけ失敗しました。</strong><br>' + html.escape(ability_error) + '<br><span class="small">ワイド予想本体は従来ロジックで継続しています。</span></div>'
+
     form_panel = form_data_panel(horse_data, form_data)
 
     axis_horse = next(
@@ -3614,8 +3678,9 @@ def analyze():
     axis_banner = ""
     if ability_axis:
         if axis_horse:
+            axis_source = "手動上書き" if manual_ability_axis else "3部門一致を自動検出"
             axis_banner = (
-                '<div class="ok"><strong>★3部門一致 能力指数軸を固定：</strong>'
+                '<div class="ok"><strong>★能力指数軸を固定（' + html.escape(axis_source) + '）：</strong>'
                 + html.escape(str(ability_axis)) + '番 '
                 + html.escape(str(axis_horse.get("horse_name", "")))
                 + '<br><span class="small">下の3点候補は、すべてこの馬を軸にしています。</span></div>'
@@ -3627,6 +3692,7 @@ def analyze():
             )
 
     result_html = f"""
+    {ability_panel}
     {form_panel}
     {axis_banner}
     <div class="card">
