@@ -3661,13 +3661,62 @@ def analyze():
             auto_note = '<div class="note">このレースは3部門1位の完全一致なし。従来ワイドロジックで3点を選びます。</div>'
         leading_note = html.escape(str((ability_result or {}).get("leading_status", "")))
         ability_panel = f'''<div class="card">
-          <div class="title">全馬能力指数　v52.0 自動計算</div>
+          <div class="title">全馬能力指数　v52.1 自動計算</div>
           {auto_note}
           <div class="small">既存能力指数ソフトVer1.0.1と同じ配点。オッズ・人気は指数計算に使用しません。{leading_note}</div>
           <div class="scroll"><table><tr><th>馬番</th><th>馬名</th><th>総合</th><th>複勝</th><th>ワイド軸</th><th>近5走</th><th>競馬場</th><th>距離</th><th>安定</th><th>一致</th></tr>{ar}</table></div>
         </div>'''
     elif ability_error:
         ability_panel = '<div class="bad"><strong>能力指数の自動計算だけ失敗しました。</strong><br>' + html.escape(ability_error) + '<br><span class="small">ワイド予想本体は従来ロジックで継続しています。</span></div>'
+
+    # v52.1: 3部門一致軸がある場合、相手馬だけを能力指数ベースで別評価。
+    # 現行3点は変更せず、比較検証用として並べて表示する。
+    partner_panel = ""
+    if auto_ability_axis and ability_rows:
+        partner_candidates = []
+        for x in ability_rows:
+            horse_no = to_int(x.get("horse_no"), 0)
+            if not horse_no or horse_no == auto_ability_axis:
+                continue
+            partner_index = (
+                float(x.get("place", 0) or 0) * 0.40
+                + float(x.get("wide", 0) or 0) * 0.25
+                + float(x.get("stability", 0) or 0) * 0.15
+                + float(x.get("recent", 0) or 0) * 0.10
+                + float(x.get("total", 0) or 0) * 0.10
+            )
+            partner_candidates.append((partner_index, x))
+        partner_candidates.sort(key=lambda z: z[0], reverse=True)
+        partner_candidates = partner_candidates[:3]
+        if partner_candidates:
+            pr = ""
+            pcards = ""
+            for idx, (partner_index, x) in enumerate(partner_candidates, start=1):
+                no = to_int(x.get("horse_no"), 0)
+                combo = make_pair_key(auto_ability_axis, no)
+                w = next((wd for wd in wide_data if wd.get("combo") == combo), None)
+                odds_text = html.escape(str(w.get("display", "取得なし"))) if w else "取得なし"
+                pr += (
+                    f'<tr><td>{idx}位</td><td><strong>{combo}</strong></td>'
+                    f'<td>{html.escape(str(x.get("horse_name", "")))}</td>'
+                    f'<td><strong>{partner_index:.1f}</strong></td>'
+                    f'<td>{x.get("place", "")}</td><td>{x.get("wide", "")}</td>'
+                    f'<td>{x.get("stability", "")}</td><td>{odds_text}</td></tr>'
+                )
+                pcards += (
+                    f'<div class="pick-card"><div class="pick-head"><strong>{idx}位　{combo}</strong></div>'
+                    f'<div>{html.escape(str(x.get("horse_name", "")))}</div>'
+                    f'<div class="small">ワイド相手指数 {partner_index:.1f} ／ 複勝 {x.get("place", "")} ／ '
+                    f'ワイド {x.get("wide", "")} ／ 安定 {x.get("stability", "")} ／ オッズ {odds_text}倍</div></div>'
+                )
+            partner_panel = f"""<div class="card">
+              <div class="title">★能力指数で選ぶ ワイド相手候補3頭　v52.1比較検証</div>
+              <div class="ok"><strong>軸 {auto_ability_axis}番はそのまま。</strong> 現行3点は変更せず、相手選びだけ能力指数で別評価しています。</div>
+              <div class="small">相手指数＝複勝40％＋ワイド25％＋安定15％＋近5走10％＋総合10％。オッズ・人気は順位決定に使用しません。</div>
+              <div class="pick-cards">{pcards}</div>
+              <div class="scroll"><table><tr><th>順位</th><th>組合せ</th><th>相手馬</th><th>相手指数</th><th>複勝</th><th>ワイド</th><th>安定</th><th>ワイドオッズ</th></tr>{pr}</table></div>
+              <div class="note">まずは現行3点と並行表示して検証します。十分な結果が貯まるまでは自動購入候補を置き換えません。</div>
+            </div>"""
 
     form_panel = form_data_panel(horse_data, form_data)
 
@@ -3693,6 +3742,7 @@ def analyze():
 
     result_html = f"""
     {ability_panel}
+    {partner_panel}
     {form_panel}
     {axis_banner}
     <div class="card">
