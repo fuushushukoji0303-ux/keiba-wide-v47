@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-地方競馬ワイド投票管理 v51.3.2 - 発走時刻表示版
+地方競馬ワイド投票管理 v51.4.4 - 3部門一致能力指数軸固定版
 
 主な追加:
 - NAR公式サイトから当日のワイドオッズ・単勝/複勝データを取得
@@ -1417,7 +1417,7 @@ def make_pair_key(a, b):
     return f"{first}-{second}"
 
 
-def select_three_by_mode(horses, wide_data, mode, form_data=None):
+def select_three_by_mode(horses, wide_data, mode, form_data=None, forced_axis_no=0):
     """PC版v44の3点候補ルールをスマホ向けに移植。"""
     if len(horses) < 3 or not wide_data:
         return []
@@ -1468,7 +1468,57 @@ def select_three_by_mode(horses, wide_data, mode, form_data=None):
         )
         candidates.append((adjusted_score, axis, partner, wide, confidence, reason))
 
-    if mode == "堅め":
+    # v51.4.4: 3部門一致の能力指数軸が指定された場合は、
+    # 3点すべてをその馬から流す。相手選びだけ従来ロジックを使う。
+    forced_axis_no = to_int(forced_axis_no, 0)
+    if forced_axis_no:
+        axis = next(
+            (h for h in ranked if to_int(h.get("horse_no"), 0) == forced_axis_no),
+            None
+        )
+        if axis is not None:
+            for partner in ranked:
+                if to_int(partner.get("horse_no"), 0) == forced_axis_no:
+                    continue
+                combo = make_pair_key(axis["horse_no"], partner["horse_no"])
+                wide = wide_map.get(combo)
+                if not wide:
+                    continue
+
+                spread = max(0.0, wide["high"] - wide["low"])
+                if mode == "堅め":
+                    score = (
+                        abs(wide["low"] - 2.5) * 0.8
+                        + max(0, partner["market_rank"] - 2) * 0.55
+                        + spread * 0.10
+                    )
+                elif mode == "穴狙い":
+                    low = wide["low"]
+                    if low < 4.0:
+                        continue
+                    odds_penalty = abs(low - 7.0) * 0.55
+                    if low > 12.0:
+                        odds_penalty += (low - 12.0) * 0.9
+                    if low > 15.0:
+                        odds_penalty += 5.0
+                    score = (
+                        odds_penalty
+                        + abs(partner["market_rank"] - 5) * 0.35
+                        + spread * 0.08
+                    )
+                else:
+                    score = (
+                        abs(wide["low"] - 5.5) * 0.75
+                        + abs(partner["market_rank"] - 4) * 0.30
+                        + spread * 0.08
+                    )
+
+                add_candidate(
+                    axis, partner, wide, score,
+                    f"★3部門一致 能力指数軸 {forced_axis_no}番を固定"
+                )
+
+    elif mode == "堅め":
         axis = ranked[0]
         for partner in ranked[1:5]:
             combo = make_pair_key(axis["horse_no"], partner["horse_no"])
@@ -1838,8 +1888,8 @@ def add_priority_scores(recommendations):
     return recommendations
 
 
-def evaluate_race_rank(horses, wide_data, mode, remaining_budget, form_data=None):
-    recommendations = select_three_by_mode(horses, wide_data, mode, form_data)
+def evaluate_race_rank(horses, wide_data, mode, remaining_budget, form_data=None, forced_axis_no=0):
+    recommendations = select_three_by_mode(horses, wide_data, mode, form_data, forced_axis_no)
 
     if len(recommendations) < 3:
         return {
@@ -3433,6 +3483,7 @@ def analyze():
     course = request.values.get("course", "")
     race = to_int(request.values.get("race", ""), 0)
     mode = request.values.get("mode", "バランス")
+    ability_axis = to_int(request.values.get("ability_axis", ""), 0)
     opts = "".join(
         f'<option {"selected" if c == course else ""}>{c}</option>'
         for c in NAR_COURSE_CODES
@@ -3453,6 +3504,12 @@ def analyze():
       <div><label>レース</label><select name="race"><option value="">選択</option>{race_opts}</select></div>
     </div><br>
     <div><label>予想モード</label><select name="mode">{mode_opts}</select></div><br>
+    <div>
+      <label>★3部門一致 能力指数軸（馬番）</label>
+      <input name="ability_axis" inputmode="numeric" value="{ability_axis if ability_axis else ''}"
+             placeholder="例 9　3部門一致がないレースは空欄">
+      <div class="small">総合1位・複勝1位・ワイド軸1位が同じ馬の馬番を入力すると、3点すべてをその馬から流します。</div>
+    </div><br>
     <button class="green">ワイドオッズ取得 → 3点予想</button>
     </form></div>"""
 
@@ -3493,7 +3550,9 @@ def analyze():
         form_data = {}
 
     remaining_budget = summary()["remaining"]
-    result = evaluate_race_rank(horse_data, wide_data, mode, remaining_budget, form_data)
+    result = evaluate_race_rank(
+        horse_data, wide_data, mode, remaining_budget, form_data, ability_axis
+    )
     baseline_result = evaluate_race_rank_baseline(
         horse_data, wide_data, mode, remaining_budget
     )
@@ -3548,8 +3607,28 @@ def analyze():
 
     form_panel = form_data_panel(horse_data, form_data)
 
+    axis_horse = next(
+        (h for h in horse_data if to_int(h.get("horse_no"), 0) == ability_axis),
+        None
+    ) if ability_axis else None
+    axis_banner = ""
+    if ability_axis:
+        if axis_horse:
+            axis_banner = (
+                '<div class="ok"><strong>★3部門一致 能力指数軸を固定：</strong>'
+                + html.escape(str(ability_axis)) + '番 '
+                + html.escape(str(axis_horse.get("horse_name", "")))
+                + '<br><span class="small">下の3点候補は、すべてこの馬を軸にしています。</span></div>'
+            )
+        else:
+            axis_banner = (
+                '<div class="bad">入力した能力指数軸の馬番が出走馬に見つかりません。'
+                '馬番を確認してください。</div>'
+            )
+
     result_html = f"""
     {form_panel}
+    {axis_banner}
     <div class="card">
       <div class="title">{html.escape(course)} {race}R　参考判定</div>
       <div class="grade">{html.escape(result["grade"])}</div>
@@ -3559,7 +3638,7 @@ def analyze():
     </div>
 
     <div class="card">
-      <div class="title">3点候補</div>
+      <div class="title">3点候補{"　★能力指数軸固定" if ability_axis and axis_horse else ""}</div>
       <div class="pick-cards">{rec_cards or '<div class="note">候補を3点作れませんでした。</div>'}</div>
       {(('<div class="ok">' + html.escape(allocation["note"]) + '</div>') if allocation.get("all_positive") and allocation.get("note") else '')}
       {(('<div class="note">' + html.escape(allocation["note"]) + '</div>') if (not allocation.get("all_positive")) and allocation.get("note") and recs else '')}
