@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-地方競馬ワイド投票管理 v52.0 - 能力指数完全統合版
+地方競馬ワイド投票管理 v52.2 - 当日全場全レース一括予想・発走時刻表示版
 
 主な追加:
 - NAR公式サイトから当日のワイドオッズ・単勝/複勝データを取得
@@ -30,7 +30,7 @@ from datetime import datetime, timezone, timedelta
 from html.parser import HTMLParser
 from pathlib import Path
 
-from flask import Flask, request, redirect, url_for, session
+from flask import Flask, request, redirect, url_for, session, jsonify
 
 # v52.0 能力指数ソフト Ver1.0.1 のロジックを統合
 try:
@@ -3286,6 +3286,7 @@ def page(body, title=APP_TITLE):
 <a class="btn secondary" href="/analytics">成績分析</a>
 <a class="btn secondary" href="/validation">予想検証</a>
 <a class="btn secondary" href="/courses">本日の開催</a>
+<a class="btn green" href="/all-batch">全場・全レース一括予想</a>
 <a class="btn green" href="/closing-soon">発走5分前</a>
 </div>
 {('<div class="member-status">会員ログイン中：' + html.escape(str(session.get("member_id",""))) + '　<a href="/logout">ログアウト</a></div>') if LOGIN_ENABLED and session.get("member_authenticated") else ('<div class="member-status setup">販売前：会員ログイン未設定</div>' if not LOGIN_ENABLED else '')}
@@ -3451,6 +3452,7 @@ def home():
       <div class="v51-menu-grid">
         <a class="v51-menu-tile" href="/closing-soon"><div class="v51-menu-icon">⏱️</div><strong>発走5分前</strong><span>スキマ時間に発走間近のレースを確認</span></a>
         <a class="v51-menu-tile" href="/courses"><div class="v51-menu-icon">🏇</div><strong>本日の開催</strong><span>今日の競馬場とレースをまとめて確認</span></a>
+        <a class="v51-menu-tile" href="/all-batch"><div class="v51-menu-icon">📋</div><strong>全場・全レース一括予想</strong><span>発走時刻・能力指数軸・ワイド3点を一括表示</span></a>
         <a class="v51-menu-tile" href="/validation"><div class="v51-menu-icon">📊</div><strong>予想検証</strong><span>現行ロジックと旧ロジックを比較</span></a>
       </div>
     </div>
@@ -3740,7 +3742,12 @@ def analyze():
                 '馬番を確認してください。</div>'
             )
 
+    # v52.2: 個別予想にもNAR公式の発走予定時刻を表示する。
+    start_dt = nar_get_race_start_time(course, race)
+    start_text = start_dt.strftime("%H:%M") if start_dt else "取得できませんでした"
     result_html = f"""
+    <div class="card"><div class="title">{html.escape(course)} {race}R　発走予定 {html.escape(start_text)}（日本時間）</div>
+    <div class="small">NAR公式の発走予定時刻です。実際の投票締切時刻ではありません。</div></div>
     {ability_panel}
     {partner_panel}
     {form_panel}
@@ -4368,9 +4375,18 @@ def closing_soon():
             except Exception:
                 form_data = {}
 
+            # v52.2: 一括予想でも個別画面と同じ3部門一致の軸を適用する。
+            axis_no = 0
+            if calculate_ability_indices is not None:
+                try:
+                    idx = calculate_ability_indices(course, race_no, nar_date_text())
+                    axis_no = to_int(idx.get("triple_axis"), 0)
+                except Exception:
+                    pass
             result = evaluate_race_rank(
-                horse_data, wide_data, mode, remaining, form_data
+                horse_data, wide_data, mode, remaining, form_data, axis_no
             )
+            result["_ability_axis"] = axis_no
             result["_validation_pace"] = predict_race_pace(form_data).get(
                 "pace", "判定不能"
             )
@@ -4535,6 +4551,7 @@ def courses():
 
     return page(
         f"""<div class="card"><div class="title">本日の開催</div>
+        <div class="actions"><a class="btn green" href="/all-batch">★ 当日開催の全競馬場・全レースを一括予想</a></div>
         <div class="note">レース番号をタップ＝そのレースだけ予想。「最終Rを予想」＝従来どおり。「全レース一括予想」＝発売中レースをまとめて判定します。</div>
         {blocks}</div>""",
         "本日の開催"
@@ -4635,7 +4652,7 @@ def course_batch():
 
         cards += f"""<div class="batch-card {'good' if grade in ('S+','S','S-','A') else ''}">
           <div class="batch-top"><div class="batch-race">{race_no}R　発走 {html.escape(start_text)}</div><span class="batch-grade">{html.escape(grade)}</span></div>
-          <div class="batch-meta">参考スコア {int(result["score"])} / {html.escape(mode)}モード</div>
+          <div class="batch-meta">参考スコア {int(result["score"])} / {html.escape(mode)}モード ／ {'★3部門一致軸 ' + str(result.get('_ability_axis')) + '番' if result.get('_ability_axis') else '3部門一致なし・従来軸'}</div>
           <div class="batch-picks">{picks}</div>
           <a class="btn {'green' if grade in ('S+','S','S-','A') else 'secondary'}" href="{detail_url}">詳しい予想・購入額を見る</a>
         </div>"""
@@ -4653,6 +4670,196 @@ def course_batch():
         </div>""",
         f"{course} 全レース一括予想"
     )
+
+
+# ===== v52.2 当日開催・全場全レース一括予想 =====
+# 一度の長時間HTTPリクエストで全レースを処理せず、ブラウザから順次取得する。
+# Renderの無料プランでも途中結果を表示し、取得不可は取得不可として残す。
+
+@app.get("/all-batch")
+def all_batch():
+    return page("""
+    <div class="card">
+      <div class="title">★ 本日の全競馬場・全レース 一括予想　v52.2</div>
+      <div class="note">当日開催の平地競馬場（最大14場、ばんえい除外）を調べ、全レースの発走予定時刻・3部門一致軸・ワイド3点候補を表示します。</div>
+      <div class="note">この画面を開くと自動で開始します。全レースの取得には数分以上かかる場合があります。画面を開いたままお待ちください。</div>
+      <div class="actions"><button class="green" id="batch-start" type="button">最初から再取得</button></div>
+      <div class="summary-strip">
+        <div><span>対象レース</span><strong id="batch-total">--</strong></div>
+        <div><span>処理済み</span><strong id="batch-done">0</strong></div>
+        <div><span>予想成功</span><strong id="batch-ok">0</strong></div>
+      </div>
+      <div class="note" id="batch-status" role="status" aria-live="polite">本日の開催を確認しています…</div>
+      <div class="small">発走時刻はNAR公式の予定時刻で、投票締切ではありません。オッズが未発売・締切後・取得不可のレースは予想を作らず理由を表示します。自動投票はしません。</div>
+    </div>
+    <div class="batch-grid" id="all-batch-cards"></div>
+    <script>
+    (function(){
+      const byId=(id)=>document.getElementById(id);
+      const cards=byId('all-batch-cards');
+      let generation=0;
+      function element(tag,cls,txt){
+        const e=document.createElement(tag);
+        if(cls)e.className=cls;
+        if(txt!==undefined)e.textContent=String(txt);
+        return e;
+      }
+      function renderResult(node,data){
+        node.replaceChildren();
+        const top=element('div','batch-top');
+        top.append(element('div','batch-race',data.course+' '+data.race+'R　発走 '+(data.start_time||'--:--')));
+        top.append(element('span','batch-grade',data.status==='ok'?(data.grade||'－'):'－'));
+        node.append(top);
+        if(data.status==='ok'){
+          const axis=data.axis_no?('★3部門一致軸 '+data.axis_no+'番 '+(data.axis_name||'')):
+                     (data.ability_status==='ok'?'3部門一致なし（従来ワイド軸）':'能力指数取得不可（従来ワイド軸）');
+          node.append(element('div','batch-meta',axis+' ／ 参考スコア '+data.score));
+          const picks=element('div','batch-picks');
+          if(data.picks&&data.picks.length){
+            data.picks.forEach((p,i)=>picks.append(element('div','', (i+1)+'位 '+p.combo+'　'+p.odds+'倍')));
+          }else{picks.textContent='3点候補なし';}
+          node.append(picks);
+          if(data.ability_status==='error')node.append(element('div','small','能力指数：'+data.ability_message));
+        }else{
+          node.append(element('div','batch-meta',data.message||'取得できませんでした'));
+        }
+        const a=element('a','btn secondary','個別の詳しい予想');
+        a.href='/analyze?course='+encodeURIComponent(data.course)+'&race='+encodeURIComponent(data.race)+'&mode='+encodeURIComponent('バランス')+'&auto=1';
+        node.append(a);
+      }
+      async function start(){
+        const my=++generation;
+        byId('batch-start').disabled=true;
+        cards.replaceChildren();
+        byId('batch-total').textContent='--';byId('batch-done').textContent='0';byId('batch-ok').textContent='0';
+        byId('batch-status').textContent='本日の開催場と全レースを確認しています…';
+        try{
+          const r=await fetch('/api/all-batch/meetings',{cache:'no-store'});
+          if(!r.ok)throw Error('開催情報の取得に失敗しました (HTTP '+r.status+')');
+          const obj=await r.json();
+          if(my!==generation)return;
+          if(obj.error)throw Error(obj.error);
+          const jobs=[];
+          (obj.meetings||[]).forEach(m=>(m.races||[]).forEach(race=>jobs.push({course:m.course,race:race})));
+          byId('batch-total').textContent=jobs.length;
+          if(!jobs.length){byId('batch-status').textContent='本日の開催レースを取得できませんでした。NAR公式の開催情報をご確認ください。';return;}
+          const nodes=new Map();
+          jobs.forEach(job=>{
+            const card=element('div','batch-card');
+            card.append(element('div','batch-race',job.course+' '+job.race+'R　取得待ち'));
+            cards.append(card);
+            nodes.set(job.course+'-'+job.race,card);
+          });
+          let next=0,done=0,ok=0;
+          byId('batch-status').textContent=obj.meetings.length+'場・'+jobs.length+'レースを順次予想中。画面を閉じずにお待ちください。';
+          async function worker(){
+            while(my===generation && next<jobs.length){
+              const job=jobs[next++];
+              const key=job.course+'-'+job.race;
+              const node=nodes.get(key);
+              node.firstChild.textContent=job.course+' '+job.race+'R　分析中…';
+              let data;
+              try{
+                const u='/api/all-batch/race?course='+encodeURIComponent(job.course)+'&race='+job.race;
+                const response=await fetch(u,{cache:'no-store'});
+                if(!response.ok)throw Error('HTTP '+response.status);
+                data=await response.json();
+              }catch(err){data={course:job.course,race:job.race,status:'error',message:'通信エラー：'+String(err.message||err)};}
+              if(my!==generation)return;
+              renderResult(node,data);
+              done++;
+              if(data.status==='ok')ok++;
+              byId('batch-done').textContent=done;
+              byId('batch-ok').textContent=ok;
+              byId('batch-status').textContent=done+'/'+jobs.length+'レース処理済み（予想成功 '+ok+'）。';
+            }
+          }
+          await Promise.all(Array.from({length:Math.min(2,jobs.length)},()=>worker()));
+          if(my===generation)byId('batch-status').textContent='一括予想が完了しました。'+jobs.length+'レース中、'+ok+'レースで予想を表示。未発売・取得不可のレースも一覧に残しています。';
+        }catch(err){
+          if(my===generation)byId('batch-status').textContent='エラー：'+String(err.message||err);
+        }finally{if(my===generation)byId('batch-start').disabled=false;}
+      }
+      byId('batch-start').addEventListener('click',start);
+      start();
+    })();
+    </script>
+    """, "本日の全場・全レース一括予想")
+
+
+@app.get("/api/all-batch/meetings")
+def all_batch_meetings():
+    def one_course(course):
+        try:
+            return course, race_numbers(course)
+        except Exception:
+            return course, []
+    found={}
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futures=[pool.submit(one_course,c) for c in NAR_COURSE_CODES]
+        for f in as_completed(futures):
+            course,nums=f.result()
+            if nums:found[course]=nums
+    return jsonify({"date":today(),"meetings":[{"course":c,"races":found[c]}
+        for c in NAR_COURSE_CODES if c in found]})
+
+
+@app.get("/api/all-batch/race")
+def all_batch_race():
+    course=request.args.get('course','').strip()
+    race_no=to_int(request.args.get('race'),0)
+    if course not in NAR_COURSE_CODES or not 1<=race_no<=12:
+        return jsonify({"status":"error","message":"競馬場またはレース番号が不正です"}),400
+    payload={"course":course,"race":race_no,"start_time":"--:--","status":"error"}
+    try:
+        # 時刻・オッズ・出走馬は独立しているため並列取得し、1レースの待ち時間を短縮。
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            f_start=pool.submit(nar_get_race_start_time,course,race_no)
+            f_wide=pool.submit(nar_get_wide_odds,course,race_no)
+            f_horse=pool.submit(nar_get_horse_market,course,race_no)
+            try:start_dt=f_start.result()
+            except Exception:start_dt=None
+            if start_dt:payload['start_time']=start_dt.strftime('%H:%M')
+            wide_data=f_wide.result()
+            horse_data=f_horse.result()
+        if not wide_data:
+            payload.update(status='skip',message='ワイドオッズ未発売・締切後・取得不可')
+            return jsonify(payload)
+        if not horse_data:
+            payload.update(status='skip',message='出走馬・単勝複勝データを取得できません')
+            return jsonify(payload)
+        def get_form():
+            try:
+                fd=nar_get_form_data(course,race_no,horse_data)
+                attach_jockey_stats(fd)
+                return fd
+            except Exception:
+                return {}
+        def get_ability():
+            if calculate_ability_indices is None:
+                return None, '能力指数モジュールが読み込めません'
+            try:
+                return calculate_ability_indices(course,race_no,nar_date_text()), ''
+            except Exception as exc:
+                return None, f'{type(exc).__name__}: {exc}'[:180]
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            f_form=pool.submit(get_form)
+            f_ability=pool.submit(get_ability)
+            form_data=f_form.result()
+            ability_result,ability_message=f_ability.result()
+        ability_rows=(ability_result or {}).get('rows',[])
+        axis_no=to_int((ability_result or {}).get('triple_axis'),0)
+        ability_status='ok' if ability_rows else 'error'
+        if not ability_rows and not ability_message:ability_message='指数データなし'
+        result=evaluate_race_rank(horse_data,wide_data,'バランス',summary()['remaining'],form_data,axis_no)
+        axis_name=next((str(x.get('horse_name','')) for x in ability_rows if to_int(x.get('horse_no'),0)==axis_no),'')
+        payload.update(status='ok',grade=result.get('grade','－'),score=result.get('score',0),
+            axis_no=axis_no,axis_name=axis_name,ability_status=ability_status,ability_message=ability_message,
+            picks=[{'combo':x.get('combo',''),'odds':x.get('display','')} for x in result.get('recommendations',[])[:3]])
+        return jsonify(payload)
+    except Exception as exc:
+        payload.update(status='error',message=f'{type(exc).__name__}: {exc}'[:200])
+        return jsonify(payload)
 
 
 @app.get("/validation")
