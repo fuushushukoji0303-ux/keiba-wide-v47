@@ -5723,7 +5723,7 @@ def history_lab_v528():
                 f = request.files.get(field)
                 if not f or not f.filename.lower().endswith('.csv'):
                     raise ValueError('公式CSVを3つとも選択してください。')
-                blobs.append(f.stream.read(9_000_001))
+                blobs.append(f.stream.read(20_000_001))
             result = v528_study(*blobs)
             output = ('<div class="card"><div class="title">独立検証の結果</div>'
                 '<p>検証可能なレース：'+str(result['studied'])+' ／ 全対象レース：'+str(result['total'])+

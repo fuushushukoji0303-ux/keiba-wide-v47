@@ -7,13 +7,13 @@ import io
 from collections import defaultdict
 from datetime import datetime
 
-MAX_UPLOAD = 9_000_000
+MAX_UPLOAD = 20_000_000
 COURSES = {'門別','盛岡','水沢','浦和','船橋','大井','川崎','金沢','笠松','名古屋','園田','姫路','高知','佐賀'}
 
 
 def load(blob, required):
     if not blob or len(blob)>MAX_UPLOAD:
-        raise ValueError('各CSVは9MB以下にしてください')
+        raise ValueError('各CSVは20MB以下にしてください')
     try:
         text=blob.decode('utf-8-sig')
     except UnicodeError:
