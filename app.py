@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-地方競馬ワイド投票管理 v52.5 - 過去レースCSV照合・時系列検証版
+地方競馬ワイド投票管理 v52.6 - 公式CSV時系列研究版
 
 主な追加:
 - NAR公式サイトから当日のワイドオッズ・単勝/複勝データを取得
@@ -33,6 +33,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 import csv
 import io
+from historical_replay import replay as replay_official_csv
 from history_lab import (RESULT_FIELDS, PRED_FIELDS, parse_results, parse_predictions,
                          snapshot_outcome, group_stats, time_split)
 
@@ -5709,6 +5710,50 @@ def history_lab_table(rows, label, dimension='strategy'):
             '<th>払戻</th><th>収支</th><th>回収率</th></tr>'+''.join(lines or ['<tr><td colspan="8">対象データなし</td></tr>'])+'</table></div>')
 
 
+# ===== v52.6 公式CSV・時系列の簡易研究（既存の指数とは別） =====
+@app.route('/history-lab/official-replay', methods=['GET','POST'])
+def history_lab_official_replay():
+    output=''
+    if request.method=='POST':
+        try:
+            blobs=[]
+            for field in ('horselist','racelist','payback'):
+                f=request.files.get(field)
+                if not f or not f.filename.lower().endswith('.csv'):
+                    raise ValueError('3つの公式CSVファイルをすべて選んでください。')
+                data=f.stream.read(9_000_001)
+                blobs.append(data)
+            result=replay_official_csv(*blobs)
+            def stat(label, data):
+                roi=('-' if data['roi'] is None else str(data['roi'])+'%')
+                return (f'<tr><td>{html.escape(label)}</td><td>{data["races"]}</td>'
+                        f'<td>{data["hits"]}</td><td>{data["stake"]:,}円</td>'
+                        f'<td>{data["payout"]:,}円</td><td>{data["profit"]:+,}円</td><td>{roi}</td></tr>')
+            output=(f'<div class="card"><div class="title">研究結果（同じ月の過去レースから順次学習）</div>'
+                    f'<div class="small">出走馬行数 {result["horse_rows"]:,} ／ 対象レース {result["races_total"]:,} ／ '
+                    f'検証できたレース {result["all"]["races"]:,} ／ 検証日数 {result["dates"]}</div>'
+                    '<div style="overflow-x:auto"><table><tr><th>期間</th><th>レース</th><th>的中レース</th><th>投資</th><th>払戻</th><th>収支</th><th>回収率</th></tr>'
+                    +stat('全期間',result['all'])+stat('前半70%',result['earlier'])+stat('後半30%',result['later'])+'</table></div>'
+                    f'<div class="small">対象外内訳：{html.escape(str(result["skipped"]))}</div>'
+                    '<div class="note">これは「過去の着順だけを使った簡易3頭ボックス研究」であり、'
+                    'v52.5の総合能力指数・複勝指数・ワイド軸指数を再現した結果ではありません。'
+                    '各馬の過去の出走が同じアップロード期間に存在しない場合は検証できません。'
+                    '実際の購入時点のオッズではなく確定払戻を使った仮想計算です。'
+                    '的中・利益の保証はありません。買い目の購入や既存DBへの登録は行いません。</div></div>')
+        except (ValueError, UnicodeError, OverflowError) as exc:
+            output='<div class="bad">読み込みエラー：'+html.escape(str(exc))+'</div>'
+    return page(f"""<div class="card"><div class="title">v52.6 公式CSV・過去レース研究</div>
+    <div class="note">2026年9月の公式CSVを3つ選んで「研究を実行」を押してください。'
+    '予想システム本体の能力指数を再現する機能ではありません。レース前に分かる「以前のレースの着順」のみで'
+    '簡易ワイド3頭ボックスを試します。最初の月は過去成績が不足するレースが多くなります。</div>'
+    <form method="post" enctype="multipart/form-data">
+    <p>① 202609_horselist.csv <input type="file" name="horselist" accept=".csv" required></p>
+    <p>② 202609_racelist.csv <input type="file" name="racelist" accept=".csv" required></p>
+    <p>③ 202609_payback.csv <input type="file" name="payback" accept=".csv" required></p>
+    <button type="submit">研究を実行する（購入しません）</button></form>
+    <p><a class="btn secondary" href="/history-lab">v52.5過去データ検証に戻る</a></p></div>{output}""",'v52.6 公式CSV研究')
+
+
 @app.get('/history-lab')
 def history_lab_page():
     rows, skipped, n_results, n_snapshots, n_forward=history_lab_rows()
@@ -5726,7 +5771,7 @@ def history_lab_page():
       <div class="small">{stats}</div>
       <div class="small">対象外：結果未登録 {skipped['no_result']}件、発走後の予想・時刻不正 {skipped['not_pre_race']}件、
       不正なデータ {skipped['invalid']}件、買い目なし {skipped['no_bets']}件</div></div>
-      <div class="card"><div class="title">① 過去の確定ワイド払戻を取り込む</div>
+      <div class="card"><div class="title">v52.6 新機能</div><a class="btn secondary" href="/history-lab/official-replay">公式CSV 3ファイルで過去レース研究を開く</a></div><div class="card"><div class="title">① 過去の確定ワイド払戻を取り込む</div>
       <div class="small">日付・競馬場・レース番号・発走時刻・ワイドの組合せ・100円あたり払戻金を入力したCSVを使います。
       取り込むデータの利用権限と正確性を確認してください。既存結果は同じレース番号なら更新されます。</div>
       <div class="actions"><a class="btn secondary" href="/history-lab/template/results">結果CSVのひな形</a></div>
