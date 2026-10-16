@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-地方競馬ワイド投票管理 v52.3 - 条件別ワイド買い目切替・比較検証版
+地方競馬ワイド投票管理 v52.4 - ワイド回収率重視・オッズ帯検証版
 
 主な追加:
 - NAR公式サイトから当日のワイドオッズ・単勝/複勝データを取得
@@ -21,6 +21,8 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import html
+import json
+import math
 import os
 import re
 import sqlite3
@@ -211,6 +213,24 @@ def init_db():
                     f"ALTER TABLE validation_predictions "
                     f"ADD COLUMN {col_name} {col_type}"
                 )
+
+        # v52.4: 初回の買い目を固定保存。再取得・オッズ更新で過去予想を上書きしない。
+        con.execute("""CREATE TABLE IF NOT EXISTS v524_trials (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            race_date TEXT NOT NULL,
+            recorded_at TEXT NOT NULL,
+            course TEXT NOT NULL,
+            race INTEGER NOT NULL,
+            mode TEXT NOT NULL,
+            v523_pairs TEXT NOT NULL DEFAULT '[]',
+            v524_pairs TEXT NOT NULL DEFAULT '[]',
+            screen_status TEXT NOT NULL DEFAULT '',
+            result TEXT NOT NULL DEFAULT '未確定',
+            v523_return INTEGER NOT NULL DEFAULT 0,
+            v524_return INTEGER NOT NULL DEFAULT 0,
+            checked_at TEXT NOT NULL DEFAULT '',
+            UNIQUE(race_date, course, race, mode)
+        )""")
 
 
 
@@ -2099,6 +2119,171 @@ def variable_wide_strategy(ability_rows, wide_data, old_result, remaining_budget
     return result
 
 
+# ===== v52.4 回収率優先・履歴に基づくオッズ帯検証（自動投票なし） =====
+# 「指数から的中確率を算出」はしない。過去の確定結果が足りない間は
+# 有利な買い目があると判定しない。過去の実績も将来の利益を保証しない。
+V524_ODDS_BANDS = ((2.0, 3.0), (3.0, 5.0), (5.0, 8.0),
+                    (8.0, 13.0), (13.0, 25.0))
+
+
+def v524_band(odds):
+    try:
+        odds = float(odds)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(odds):
+        return None
+    for lo, hi in V524_ODDS_BANDS:
+        if lo <= odds < hi:
+            return (lo, hi)
+    return None
+
+
+def v524_wilson_lower(hits, n, z=1.282):
+    """片側約90%のWilson下限。レース単位の観測で過信を抑える。"""
+    if n <= 0:
+        return 0.0
+    p = hits / n
+    z2 = z * z
+    return max(0.0, (p + z2 / (2*n) - z * math.sqrt(
+        (p*(1-p) + z2/(4*n)) / n)) / (1 + z2/n))
+
+
+def v524_history_by_band(race_date):
+    """過去の旧3点予想の確定結果からオッズ帯別の観測値を得る。
+
+    同じレース・同じオッズ帯からは1件のみ採用し、3点の相関による
+    見かけのサンプル数増大を抑える。現行の可変案とは選択基準が
+    異なるため、これだけで可変案の期待値を確定できない。
+    """
+    counts = {band: {'n': 0, 'hits': 0} for band in V524_ODDS_BANDS}
+    with db() as con:
+        rows = con.execute("""SELECT race_date,course,race,
+            candidate1,candidate2,candidate3,odds1,odds2,odds3,official_wide
+            FROM validation_predictions
+            WHERE race_date < ? AND result IN ('的中','ハズレ')
+              AND official_wide IS NOT NULL AND official_wide != ''
+            ORDER BY race_date DESC, id DESC LIMIT 5000""", (race_date,)).fetchall()
+    seen = set()
+    for r in rows:
+        official = {normalize_wide_combo(m.group(1)) for m in re.finditer(
+            r'(\d{1,2}\s*-\s*\d{1,2})\s+[\d,]+\s*円',
+            str(r['official_wide'] or ''))}
+        if not official:
+            continue
+        race_key = (r['race_date'], r['course'], r['race'])
+        for i in (1, 2, 3):
+            combo = normalize_wide_combo(r[f'candidate{i}'] or '')
+            band = v524_band(r[f'odds{i}'])
+            if not combo or band is None or (race_key, band) in seen:
+                continue
+            seen.add((race_key, band))
+            counts[band]['n'] += 1
+            counts[band]['hits'] += int(combo in official)
+    return counts
+
+
+def v524_value_screen(strategy, wide_data, remaining_budget, race_date=None):
+    """v52.3候補を、過去の確定オッズ帯と下限損益分岐率で保守的に選別。"""
+    result = {'status': '見送り', 'reason': '', 'pairs': [], 'checked': [],
+              'experimental': True, 'max_stake': 0}
+    source = list((strategy or {}).get('pairs') or [])
+    if not source:
+        result['reason'] = 'v52.3の候補がないため、購入候補を作りません'
+        return result
+    if remaining_budget < 100:
+        result['reason'] = '残り予算が100円未満です'
+        return result
+    history = v524_history_by_band(race_date or today())
+    odds_map = {normalize_wide_combo(x.get('combo', '')): x for x in wide_data}
+    qualified = []
+    for item in source:
+        combo = normalize_wide_combo(item.get('combo', ''))
+        market = odds_map.get(combo) or {}
+        low = to_float(market.get('low'), 0)
+        high = to_float(market.get('high'), 0)
+        band = v524_band(low)
+        detail = {'combo': combo, 'odds': item.get('odds', ''),
+                  'low': low, 'sample': 0, 'rate': None,
+                  'break_even': round(100 / low, 1) if low > 0 else None,
+                  'lower_rate': None, 'margin': None, 'decision': ''}
+        if band is None:
+            detail['decision'] = 'オッズ2.0～25.0倍の検証対象外'
+        elif high < low or high > low * 1.40:
+            detail['decision'] = 'オッズの変動幅が大きいため保留'
+        else:
+            h = history[band]
+            detail['sample'] = h['n']
+            if h['n'] < 40:
+                detail['decision'] = f'同オッズ帯の過去確定レース不足（{h["n"]}/40）'
+            else:
+                lower = v524_wilson_lower(h['hits'], h['n'])
+                detail['rate'] = round(100*h['hits']/h['n'], 1)
+                detail['lower_rate'] = round(100*lower, 1)
+                detail['margin'] = round(100*(low*lower-1), 1)
+                if low * lower >= 1.05:
+                    detail['decision'] = '過去実績の保守的下限が損益分岐を5%以上上回る（要前向き検証）'
+                    qualified.append(detail)
+                else:
+                    detail['decision'] = '過去実績の保守的下限が必要的中率を満たさない'
+        result['checked'].append(detail)
+    # 仮想予算：1レース最大300円、1組100円。自動購入は一切しない。
+    max_pairs = min(3, int(remaining_budget // 100))
+    qualified.sort(key=lambda d: d['margin'], reverse=True)
+    selected = qualified[:max_pairs]
+    result['pairs'] = [{'combo': d['combo'], 'odds': d['odds'],
+                        'amount': 100, 'margin': d['margin']} for d in selected]
+    result['max_stake'] = 100 * len(selected)
+    if selected:
+        result['status'] = '暫定優位候補（検証用）'
+        result['reason'] = '過去の旧方式データによる暫定スクリーニング。新方式の利益は未検証'
+    elif any(d['sample'] < 40 and v524_band(d['low']) is not None for d in result['checked']):
+        result['status'] = 'データ不足・見送り'
+        result['reason'] = '過去の確定レースが少ないため、有利な買い目とは判定できません'
+    else:
+        result['reason'] = '損益分岐条件を保守的に満たす組合せがありません'
+    return result
+
+
+def v524_save_trial(course, race, mode, strategy, screen):
+    """表示時点の比較候補を固定。未確定レースの結果は後日照合する。"""
+    def normalize_pairs(items):
+        return [{'combo': normalize_wide_combo(x.get('combo','')),
+                 'odds': str(x.get('odds','')), 'amount': 100}
+                for x in items if normalize_wide_combo(x.get('combo',''))]
+    with db() as con:
+        con.execute("""INSERT INTO v524_trials
+            (race_date,recorded_at,course,race,mode,v523_pairs,v524_pairs,screen_status)
+            VALUES(?,?,?,?,?,?,?,?)
+            ON CONFLICT(race_date,course,race,mode) DO NOTHING""",
+            (today(), now().strftime('%Y-%m-%d %H:%M:%S'), course, int(race), mode,
+             json.dumps(normalize_pairs((strategy or {}).get('pairs') or []), ensure_ascii=False),
+             json.dumps(normalize_pairs((screen or {}).get('pairs') or []), ensure_ascii=False),
+             str((screen or {}).get('status', ''))))
+
+
+def v524_value_panel(screen):
+    status = html.escape(str(screen.get('status','見送り')))
+    reason = html.escape(str(screen.get('reason','')))
+    checks = []
+    for x in screen.get('checked', []):
+        odds = html.escape(str(x.get('odds','')))
+        rate = ('／ 過去観測的中率 '+str(x['rate'])+'% ／ 下限 '+str(x['lower_rate'])+'%') if x.get('rate') is not None else ''
+        checks.append('<div><strong>'+html.escape(str(x.get('combo','')))+
+            '</strong>　'+odds+'倍 ／ 必要的中率 '+str(x.get('break_even'))+'%'+rate+
+            '<div class="small">'+html.escape(str(x.get('decision','')))+
+            ' ／ 確定レース '+str(x.get('sample',0))+'件</div></div>')
+    selected = '、'.join(html.escape(x['combo']) for x in screen.get('pairs',[])) or 'なし'
+    return f"""<div class="card"><div class="title">v52.4 回収率重視の買い目選別（検証用）</div>
+      <div class="note"><strong>{status}</strong> ／ {reason}</div>
+      <div class="small">暫定候補：{selected} ／ 仮想購入額：{int(screen.get('max_stake',0))}円（1点100円、最大300円）</div>
+      <div class="batch-picks">{''.join(checks) or '評価対象なし'}</div>
+      <div class="small">必要的中率＝100÷ワイド下限オッズ。過去実績は旧3点予想の確定レースをオッズ帯別に集計したもので、
+      新しい買い目の的中確率やプラス期待値を示すものではありません。40レース未満は判定保留。
+      自動投票・購入入力は変更しません。結果を後から検証し、収支を比較してください。</div>
+      <div class="actions"><a class="btn secondary" href="/v524-validation">v52.4 仮想収支の検証を見る</a></div></div>"""
+
+
 def variable_strategy_panel(strategy):
     typ = html.escape(str(strategy.get("type", "見送り")))
     reason = html.escape(str(strategy.get("reason", "")))
@@ -3402,6 +3587,7 @@ def page(body, title=APP_TITLE):
 <a class="btn secondary" href="/history">成績履歴</a>
 <a class="btn secondary" href="/analytics">成績分析</a>
 <a class="btn secondary" href="/validation">予想検証</a>
+<a class="btn secondary" href="/v524-validation">v52.4収支検証</a>
 <a class="btn secondary" href="/courses">本日の開催</a>
 <a class="btn green" href="/all-batch">全場・全レース一括予想</a>
 <a class="btn green" href="/closing-soon">発走5分前</a>
@@ -3839,6 +4025,9 @@ def analyze():
 
     variable_strategy = variable_wide_strategy(ability_rows, wide_data, result, remaining_budget)
     variable_panel = variable_strategy_panel(variable_strategy)
+    v524_screen = v524_value_screen(variable_strategy, wide_data, remaining_budget)
+    v524_panel = v524_value_panel(v524_screen)
+    v524_save_trial(course, race, mode, variable_strategy, v524_screen)
 
     form_panel = form_data_panel(horse_data, form_data)
 
@@ -3871,6 +4060,7 @@ def analyze():
     {ability_panel}
     {partner_panel}
     {variable_panel}
+    {v524_panel}
     {form_panel}
     {axis_banner}
     <div class="card">
@@ -4801,8 +4991,8 @@ def course_batch():
 def all_batch():
     return page("""
     <div class="card">
-      <div class="title">★ 本日の全競馬場・全レース 一括予想　v52.3</div>
-      <div class="note">当日開催の平地競馬場（最大14場、ばんえい除外）を調べ、全レースの発走予定時刻・3部門一致軸・従来ワイド3点と、v52.3の可変買い目案を並べて表示します。</div>
+      <div class="title">★ 本日の全競馬場・全レース 一括予想　v52.4</div>
+      <div class="note">当日開催の平地競馬場（最大14場、ばんえい除外）を調べ、全レースの発走予定時刻・3部門一致軸・従来ワイド3点と、v52.3の可変買い目案とv52.4の回収率重視・検証案を並べて表示します。</div>
       <div class="note">この画面を開くと自動で開始します。全レースの取得には数分以上かかる場合があります。画面を開いたままお待ちください。</div>
       <div class="actions"><button class="green" id="batch-start" type="button">最初から再取得</button></div>
       <div class="summary-strip">
@@ -4846,6 +5036,14 @@ def all_batch():
             box.append(element('div','', '【v52.3 可変案・検証用】 '+strategy.type));
             box.append(element('div','small',strategy.reason||''));
             (strategy.pairs||[]).forEach(p=>box.append(element('div','',p.combo+'　'+p.odds+'倍')));
+            node.append(box);
+          }
+          const v524=data.v524_screen;
+          if(v524){
+            const box=element('div','batch-picks');
+            box.append(element('div','', '【v52.4 回収率重視・検証用】 '+v524.status));
+            box.append(element('div','small',v524.reason||''));
+            (v524.pairs||[]).forEach(p=>box.append(element('div','',p.combo+'　'+p.odds+'倍 ／ 仮想'+p.amount+'円')));
             node.append(box);
           }
           if(data.ability_status==='error')node.append(element('div','small','能力指数：'+data.ability_message));
@@ -4984,6 +5182,9 @@ def all_batch_race():
         axis_name=next((str(x.get('horse_name','')) for x in ability_rows if to_int(x.get('horse_no'),0)==axis_no),'')
         strategy=variable_wide_strategy(ability_rows,wide_data,result,summary()['remaining'])
         payload['variable_strategy']=strategy
+        screen=v524_value_screen(strategy,wide_data,summary()['remaining'])
+        payload['v524_screen']=screen
+        v524_save_trial(course,race_no,'バランス',strategy,screen)
         payload.update(status='ok',grade=result.get('grade','－'),score=result.get('score',0),
             axis_no=axis_no,axis_name=axis_name,ability_status=ability_status,ability_message=ability_message,
             picks=[{'combo':x.get('combo',''),'odds':x.get('display','')} for x in result.get('recommendations',[])[:3]])
@@ -4991,6 +5192,56 @@ def all_batch_race():
     except Exception as exc:
         payload.update(status='error',message=f'{type(exc).__name__}: {exc}'[:200])
         return jsonify(payload)
+
+
+@app.get('/v524-validation')
+def v524_validation():
+    with db() as con:
+        rows=con.execute('SELECT * FROM v524_trials ORDER BY race_date DESC,id DESC LIMIT 500').fetchall()
+    settled=[r for r in rows if r['result'] in ('的中','ハズレ')]
+    def aggregate(field, retfield):
+        staked=sum(100*len(json.loads(r[field])) for r in settled)
+        returned=sum(int(r[retfield] or 0) for r in settled)
+        return staked,returned,(round(returned/staked*100,1) if staked else None)
+    a=aggregate('v523_pairs','v523_return')
+    b=aggregate('v524_pairs','v524_return')
+    def fmt(x):
+        return '未算出' if x[2] is None else f'{x[2]:.1f}%'
+    lines=''.join('<tr><td>'+html.escape(str(r['race_date']))+'</td><td>'+html.escape(str(r['course']))+
+        ' '+str(r['race'])+'R</td><td>'+html.escape(str(r['screen_status']))+'</td><td>'+html.escape(str(r['result']))+
+        '</td><td>'+str(100*len(json.loads(r['v523_pairs'])))+'円</td><td>'+str(int(r['v523_return']))+
+        '円</td><td>'+str(100*len(json.loads(r['v524_pairs'])))+'円</td><td>'+str(int(r['v524_return']))+'円</td></tr>' for r in rows)
+    return page(f"""<div class="card"><div class="title">v52.4 仮想収支・前向き検証</div>
+      <div class="note">予想時点の買い目を固定して、後日の公式払戻と照合します。表示した時点での仮想購入であり、実際の購入記録ではありません。</div>
+      <div class="summary-strip"><div><span>記録レース</span><strong>{len(rows)}</strong></div>
+      <div><span>結果確定</span><strong>{len(settled)}</strong></div></div>
+      <div class="small">v52.3：仮想投資 {a[0]:,}円／仮想払戻 {a[1]:,}円／回収率 {fmt(a)}／収支 {a[1]-a[0]:+,}円</div>
+      <div class="small">v52.4：仮想投資 {b[0]:,}円／仮想払戻 {b[1]:,}円／回収率 {fmt(b)}／収支 {b[1]-b[0]:+,}円</div>
+      <form method="post" action="/v524/settle"><button type="submit">未確定レースの払戻を照合</button></form>
+      <div class="small">※見送りが多い間は回収率を計算できません。各方式の的中率・回収率は将来の利益を保証しません。Render無料プランのローカルDBは再デプロイ等で消える場合があります。</div>
+      <div class="scroll"><table><tr><th>日付</th><th>レース</th><th>v52.4判定</th><th>結果</th><th>旧仮想投資</th><th>旧払戻</th><th>新仮想投資</th><th>新払戻</th></tr>{lines}</table></div></div>""",'v52.4 仮想収支の検証')
+
+
+@app.post('/v524/settle')
+def v524_settle():
+    with db() as con:
+        pending=con.execute("""SELECT * FROM v524_trials
+            WHERE result='未確定' ORDER BY race_date DESC,id DESC LIMIT 40""").fetchall()
+    for row in pending:
+        refunds=nar_get_wide_refunds(row['course'],int(row['race']),row['race_date'])
+        if not refunds:
+            continue
+        def calc(field):
+            return sum(int(refunds.get(normalize_wide_combo(x.get('combo','')),0))
+                       for x in json.loads(row[field]))
+        ret_old=calc('v523_pairs')
+        ret_new=calc('v524_pairs')
+        with db() as con:
+            con.execute("""UPDATE v524_trials SET result=?,v523_return=?,v524_return=?,checked_at=?
+                WHERE id=? AND result='未確定'""",
+                ('的中' if (ret_old>0 or ret_new>0) else 'ハズレ',ret_old,ret_new,
+                 now().strftime('%Y-%m-%d %H:%M:%S'),row['id']))
+    return redirect('/v524-validation')
 
 
 @app.get("/validation")
