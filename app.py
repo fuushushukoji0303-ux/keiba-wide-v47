@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-地方競馬ワイド投票管理 v52.2 - 当日全場全レース一括予想・発走時刻表示版
+地方競馬ワイド投票管理 v52.3 - 条件別ワイド買い目切替・比較検証版
 
 主な追加:
 - NAR公式サイトから当日のワイドオッズ・単勝/複勝データを取得
@@ -2000,6 +2000,123 @@ def evaluate_race_rank(horses, wide_data, mode, remaining_budget, form_data=None
     }
 
 
+# ===== v52.3 条件別買い目切替（検証用・既存購入ロジックは維持） =====
+def variable_wide_strategy(ability_rows, wide_data, old_result, remaining_budget):
+    """能力指数を変更せず、指数差・過去走データ量・発売中ワイドから可変案を作る。
+
+    注意: 閾値は仮説であり、的中確率やプラス期待値の実証値ではない。
+    従来の3点候補・保存・購入操作を変更しない並行検証表示。
+    """
+    result = {"type": "見送り", "pairs": [], "reason": "", "axis": 0, "gap": None,
+              "status": "skip", "experimental": True}
+    if not ability_rows:
+        result["reason"] = "能力指数を取得できないため判定しません"
+        return result
+    if not wide_data:
+        result["reason"] = "ワイドオッズを取得できません"
+        return result
+    rows = []
+    seen = set()
+    for r in ability_rows:
+        try:
+            no = int(r.get("horse_no", 0))
+            score = float(r.get("total", 0))
+            parsed = int(r.get("parsed", 0))
+            if no > 0 and no not in seen and 0 <= score <= 100:
+                rows.append({"no": no, "total": score, "parsed": parsed,
+                             "place": float(r.get("place", 0)),
+                             "wide": float(r.get("wide", 0)),
+                             "stability": float(r.get("stability", 0))})
+                seen.add(no)
+        except (TypeError, ValueError):
+            continue
+    rows.sort(key=lambda x: x["total"], reverse=True)
+    if len(rows) < 3:
+        result["reason"] = "指数を確認できる出走馬が3頭未満です"
+        return result
+    # 過去走がない馬ばかりの場合、見かけの指数差を信用しない。
+    if sum(r["parsed"] >= 2 for r in rows[:4]) < 3:
+        result["reason"] = "上位馬の過去走データが不足しています（上位4頭中3頭以上に2走必要）"
+        return result
+    if old_result.get("grade") == "見送り":
+        result["reason"] = "従来の参考判定が見送りのため、可変案も見送ります"
+        return result
+    gap = round(rows[0]["total"] - rows[1]["total"], 1)
+    result["gap"] = gap
+    triple = next((r for r in ability_rows if r.get("rank_total") == 1
+                   and r.get("rank_place") == 1 and r.get("rank_wide") == 1), None)
+    triple_no = int(triple.get("horse_no", 0)) if triple else 0
+    axis = rows[0]["no"]
+    if triple_no == axis and gap >= 8.0 and rows[0]["parsed"] >= 2:
+        # 強い一致軸: 指数に基づく相手指数で候補を並べる（人気・オッズは指数に混ぜない）。
+        partners = sorted(rows[1:], key=lambda x: (
+            x["place"] * 0.40 + x["wide"] * 0.25 + x["stability"] * 0.15
+            + x["total"] * 0.20), reverse=True)
+        combos = [make_pair_key(axis, r["no"]) for r in partners]
+        result["type"] = "軸流し"
+        result["axis"] = axis
+        result["reason"] = f"3部門一致の{axis}番が総合2位に{gap:.1f}点差。相手指数順に最大3点"
+        limit = 3
+    elif gap <= 5.0:
+        top = rows[:4] if len(rows) >= 4 and rows[0]["total"] - rows[3]["total"] <= 6.0 else rows[:3]
+        import itertools
+        combos = [make_pair_key(a["no"], b["no"]) for a,b in itertools.combinations(top, 2)]
+        result["type"] = f"{len(top)}頭ボックス"
+        result["reason"] = f"総合1位と2位の差が{gap:.1f}点で拮抗。上位{len(top)}頭を比較"
+        limit = len(combos)
+    elif triple_no == axis and gap >= 5.0 and rows[0]["parsed"] >= 2:
+        partners = sorted(rows[1:], key=lambda x: (
+            x["place"] * 0.40 + x["wide"] * 0.25 + x["stability"] * 0.15
+            + x["total"] * 0.20), reverse=True)
+        combos = [make_pair_key(axis, r["no"]) for r in partners]
+        result["type"] = "軸流し"
+        result["axis"] = axis
+        result["reason"] = f"3部門一致の{axis}番を暫定軸に採用。総合指数差{gap:.1f}点"
+        limit = 2
+    else:
+        result["reason"] = f"指数差{gap:.1f}点で3部門一致の信頼できる軸がなく、見送りします"
+        return result
+    odds = {str(w.get("combo", "")): w for w in wide_data}
+    selected = []
+    for combo in combos:
+        w = odds.get(combo)
+        if not w: continue
+        try:
+            low = float(w.get("low", 0))
+            high = float(w.get("high", 0))
+            if low <= 0 or high < low: continue
+        except (ValueError, TypeError): continue
+        selected.append({"combo": combo, "odds": str(w.get("display", f"{low:.1f}～{high:.1f}"))})
+        if len(selected) >= limit: break
+    if len(selected) < min(2, limit) or ("ボックス" in result["type"] and len(selected) != limit):
+        result.update(type="見送り", axis=0, reason="必要なワイド組合せのオッズが揃わないため見送りします")
+        return result
+    if remaining_budget < len(selected) * 100:
+        result.update(type="見送り", axis=0, reason=f"最低{len(selected)*100}円の検証買い目に対して残り予算が不足")
+        return result
+    result["pairs"] = selected
+    result["status"] = "ok"
+    return result
+
+
+def variable_strategy_panel(strategy):
+    typ = html.escape(str(strategy.get("type", "見送り")))
+    reason = html.escape(str(strategy.get("reason", "")))
+    pairs = strategy.get("pairs", [])
+    lines = "".join(
+        f'<div><strong>{html.escape(str(p["combo"]))}</strong>　{html.escape(str(p["odds"]))}倍</div>'
+        for p in pairs
+    ) or '<div>購入候補なし</div>'
+    return f"""<div class="card">
+      <div class="title">v52.3 条件別ワイド買い目（比較検証）</div>
+      <div class="note"><strong>暫定判定：{typ}</strong> ／ {reason}</div>
+      <div class="batch-picks">{lines}</div>
+      <div class="small">※能力指数の配点は変更していません。判定閾値は未検証の仮説です。
+      従来の3点予想・購入入力・成績履歴は変更しません。自動投票はしません。
+      オッズは変動します。的中・利益は保証されません。</div>
+    </div>"""
+
+
 def weighted_amounts(recommendations, usable):
     if not recommendations or usable < 100:
         return [0] * len(recommendations)
@@ -3720,6 +3837,9 @@ def analyze():
               <div class="note">まずは現行3点と並行表示して検証します。十分な結果が貯まるまでは自動購入候補を置き換えません。</div>
             </div>"""
 
+    variable_strategy = variable_wide_strategy(ability_rows, wide_data, result, remaining_budget)
+    variable_panel = variable_strategy_panel(variable_strategy)
+
     form_panel = form_data_panel(horse_data, form_data)
 
     axis_horse = next(
@@ -3750,6 +3870,7 @@ def analyze():
     <div class="small">NAR公式の発走予定時刻です。実際の投票締切時刻ではありません。</div></div>
     {ability_panel}
     {partner_panel}
+    {variable_panel}
     {form_panel}
     {axis_banner}
     <div class="card">
@@ -4680,8 +4801,8 @@ def course_batch():
 def all_batch():
     return page("""
     <div class="card">
-      <div class="title">★ 本日の全競馬場・全レース 一括予想　v52.2</div>
-      <div class="note">当日開催の平地競馬場（最大14場、ばんえい除外）を調べ、全レースの発走予定時刻・3部門一致軸・ワイド3点候補を表示します。</div>
+      <div class="title">★ 本日の全競馬場・全レース 一括予想　v52.3</div>
+      <div class="note">当日開催の平地競馬場（最大14場、ばんえい除外）を調べ、全レースの発走予定時刻・3部門一致軸・従来ワイド3点と、v52.3の可変買い目案を並べて表示します。</div>
       <div class="note">この画面を開くと自動で開始します。全レースの取得には数分以上かかる場合があります。画面を開いたままお待ちください。</div>
       <div class="actions"><button class="green" id="batch-start" type="button">最初から再取得</button></div>
       <div class="summary-strip">
@@ -4719,6 +4840,14 @@ def all_batch():
             data.picks.forEach((p,i)=>picks.append(element('div','', (i+1)+'位 '+p.combo+'　'+p.odds+'倍')));
           }else{picks.textContent='3点候補なし';}
           node.append(picks);
+          const strategy=data.variable_strategy;
+          if(strategy){
+            const box=element('div','batch-picks');
+            box.append(element('div','', '【v52.3 可変案・検証用】 '+strategy.type));
+            box.append(element('div','small',strategy.reason||''));
+            (strategy.pairs||[]).forEach(p=>box.append(element('div','',p.combo+'　'+p.odds+'倍')));
+            node.append(box);
+          }
           if(data.ability_status==='error')node.append(element('div','small','能力指数：'+data.ability_message));
         }else{
           node.append(element('div','batch-meta',data.message||'取得できませんでした'));
@@ -4853,6 +4982,8 @@ def all_batch_race():
         if not ability_rows and not ability_message:ability_message='指数データなし'
         result=evaluate_race_rank(horse_data,wide_data,'バランス',summary()['remaining'],form_data,axis_no)
         axis_name=next((str(x.get('horse_name','')) for x in ability_rows if to_int(x.get('horse_no'),0)==axis_no),'')
+        strategy=variable_wide_strategy(ability_rows,wide_data,result,summary()['remaining'])
+        payload['variable_strategy']=strategy
         payload.update(status='ok',grade=result.get('grade','－'),score=result.get('score',0),
             axis_no=axis_no,axis_name=axis_name,ability_status=ability_status,ability_message=ability_message,
             picks=[{'combo':x.get('combo',''),'odds':x.get('display','')} for x in result.get('recommendations',[])[:3]])
