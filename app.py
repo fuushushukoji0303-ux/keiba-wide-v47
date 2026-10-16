@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-地方競馬ワイド投票管理 v52.4 - ワイド回収率重視・オッズ帯検証版
+地方競馬ワイド投票管理 v52.5 - 過去レースCSV照合・時系列検証版
 
 主な追加:
 - NAR公式サイトから当日のワイドオッズ・単勝/複勝データを取得
@@ -31,8 +31,12 @@ import urllib.request
 from datetime import datetime, timezone, timedelta
 from html.parser import HTMLParser
 from pathlib import Path
+import csv
+import io
+from history_lab import (RESULT_FIELDS, PRED_FIELDS, parse_results, parse_predictions,
+                         snapshot_outcome, group_stats, time_split)
 
-from flask import Flask, request, redirect, url_for, session, jsonify
+from flask import Flask, request, redirect, url_for, session, jsonify, Response
 
 # v52.0 能力指数ソフト Ver1.0.1 のロジックを統合
 try:
@@ -213,6 +217,23 @@ def init_db():
                     f"ALTER TABLE validation_predictions "
                     f"ADD COLUMN {col_name} {col_type}"
                 )
+
+        # v52.5: 利用者が権利・利用条件を確認したCSVだけを取り込む。
+        con.execute("""CREATE TABLE IF NOT EXISTS history_results (
+            race_date TEXT NOT NULL, course TEXT NOT NULL, race INTEGER NOT NULL,
+            start_time TEXT NOT NULL, payouts TEXT NOT NULL,
+            source TEXT NOT NULL DEFAULT '', distance_m INTEGER NOT NULL DEFAULT 0,
+            runners INTEGER NOT NULL DEFAULT 0, going TEXT NOT NULL DEFAULT '',
+            imported_at TEXT NOT NULL,
+            PRIMARY KEY (race_date, course, race)
+        )""")
+        con.execute("""CREATE TABLE IF NOT EXISTS history_predictions (
+            race_date TEXT NOT NULL, course TEXT NOT NULL, race INTEGER NOT NULL,
+            mode TEXT NOT NULL, strategy TEXT NOT NULL,
+            prediction_at TEXT NOT NULL, bets TEXT NOT NULL,
+            imported_at TEXT NOT NULL,
+            PRIMARY KEY (race_date, course, race, mode, strategy)
+        )""")
 
         # v52.4: 初回の買い目を固定保存。再取得・オッズ更新で過去予想を上書きしない。
         con.execute("""CREATE TABLE IF NOT EXISTS v524_trials (
@@ -3588,6 +3609,7 @@ def page(body, title=APP_TITLE):
 <a class="btn secondary" href="/analytics">成績分析</a>
 <a class="btn secondary" href="/validation">予想検証</a>
 <a class="btn secondary" href="/v524-validation">v52.4収支検証</a>
+<a class="btn secondary" href="/history-lab">v52.5過去データ検証</a>
 <a class="btn secondary" href="/courses">本日の開催</a>
 <a class="btn green" href="/all-batch">全場・全レース一括予想</a>
 <a class="btn green" href="/closing-soon">発走5分前</a>
@@ -5591,6 +5613,222 @@ def validation_result(vid):
             ),
         )
     return redirect(url_for("validation"))
+
+
+# ===== v52.5 過去レースのCSV取り込み・時系列検証 =====
+
+def history_lab_rows():
+    """Only compare frozen pre-race picks with actual payouts. Never refit past picks."""
+    with db() as con:
+        results = { (r['race_date'],r['course'],r['race']):dict(r)
+            for r in con.execute('SELECT * FROM history_results').fetchall() }
+        snapshots = [dict(r) for r in con.execute('SELECT * FROM history_predictions').fetchall()]
+        forward = [dict(r) for r in con.execute('SELECT * FROM v524_trials').fetchall()]
+    evaluated=[]
+    skipped={'no_result':0,'not_pre_race':0,'invalid':0,'no_bets':0}
+    used=set()
+    for row in snapshots:
+        key=(row['race_date'],row['course'],row['race'])
+        actual=results.get(key)
+        if not actual:
+            skipped['no_result']+=1
+            continue
+        try:
+            bets=json.loads(row['bets'])
+            payouts=json.loads(actual['payouts'])
+        except (ValueError,TypeError):
+            skipped['invalid']+=1
+            continue
+        outcome=snapshot_outcome(row['prediction_at'],row['race_date'],actual['start_time'],bets,payouts)
+        if outcome is None:
+            skipped['not_pre_race']+=1
+            continue
+        if not outcome['bet']:
+            skipped['no_bets']+=1
+            continue
+        unique=(*key,row['mode'],row['strategy'])
+        used.add(unique)
+        evaluated.append(dict(date=row['race_date'],course=row['course'],race=row['race'],
+                              distance_m=actual['distance_m'], runners=actual['runners'],going=actual['going'],
+                              mode=row['mode'],strategy=row['strategy'],origin='CSV予想',**outcome))
+    for row in forward:
+        key=(row['race_date'],row['course'],row['race'])
+        actual=results.get(key)
+        if not actual:
+            continue
+        try:
+            payouts=json.loads(actual['payouts'])
+        except (ValueError,TypeError):
+            skipped['invalid']+=1
+            continue
+        for strategy,field in [('v52.3','v523_pairs'),('v52.4','v524_pairs')]:
+            unique=(*key,row['mode'],strategy)
+            if unique in used:
+                continue
+            try:
+                bets=json.loads(row[field])
+            except (ValueError,TypeError):
+                skipped['invalid']+=1
+                continue
+            if not bets:
+                skipped['no_bets']+=1
+                continue
+            outcome=snapshot_outcome(row['recorded_at'],row['race_date'],actual['start_time'],bets,payouts)
+            if outcome is None:
+                skipped['not_pre_race']+=1
+                continue
+            evaluated.append(dict(date=row['race_date'],course=row['course'],race=row['race'],
+                                  distance_m=actual['distance_m'], runners=actual['runners'],going=actual['going'],
+                                  mode=row['mode'],strategy=strategy,origin='アプリ初回記録',**outcome))
+    return evaluated,skipped,len(results),len(snapshots),len(forward)
+
+
+def history_lab_table(rows, label, dimension='strategy'):
+    groups={}
+    for row in rows:
+        if dimension=='course':
+            group=(row['course'],row['strategy'])
+        elif dimension=='distance':
+            d=int(row.get('distance_m') or 0)
+            group=((str(d)+'m') if d else '距離不明',row['strategy'])
+        elif dimension=='going':
+            group=(row.get('going') or '馬場不明',row['strategy'])
+        else:
+            group=(row['strategy'],row['mode'])
+        groups.setdefault(group,[]).append(row)
+    lines=[]
+    for (strategy,mode),items in sorted(groups.items()):
+        stat=group_stats(items)
+        roi='―' if stat['roi'] is None else f"{stat['roi']:.1f}%"
+        lines.append('<tr><td>'+html.escape(strategy)+'</td><td>'+html.escape(mode)+
+                     '</td><td>'+str(stat['races'])+'</td><td>'+str(stat['hits'])+
+                     '</td><td>'+f"{stat['bet']:,}"+'</td><td>'+f"{stat['return']:,}"+
+                     '</td><td>'+f"{stat['profit']:+,}"+'</td><td>'+roi+'</td></tr>')
+    return ('<div class="title">'+html.escape(label)+'</div><div class="scroll"><table>'
+            '<tr><th>区分/方式</th><th>方式/モード</th><th>予想件数</th><th>的中</th><th>仮想投資</th>'
+            '<th>払戻</th><th>収支</th><th>回収率</th></tr>'+''.join(lines or ['<tr><td colspan="8">対象データなし</td></tr>'])+'</table></div>')
+
+
+@app.get('/history-lab')
+def history_lab_page():
+    rows, skipped, n_results, n_snapshots, n_forward=history_lab_rows()
+    by_date=time_split(rows)
+    overview=group_stats(rows)
+    stats=f"過去結果 {n_results}レース ／ CSV予想 {n_snapshots}件 ／ 既存の初回予想 {n_forward}件 ／ 有効な予想 {overview['races']}件"
+    msg=html.escape(request.args.get('msg','')[:200])
+    split_text=('日付の異なる5日分以上が必要です。現在は時系列分割を表示しません。'
+                if not by_date['enough'] else
+                '古い日付70%・新しい日付30%（日付単位で分離）。新しい側は未調整の検証用です。')
+    return page(f"""<div class="card"><div class="title">v52.5 過去レース学習の土台・回収率検証</div>
+      <div class="note">過去のレース前に記録した予想と、確定ワイド払戻を照合します。
+      過去の結果を知った状態で予想を作り直すことはしません。自動購入・自動スクレイピングはしません。</div>
+      {('<div class="ok">'+msg+'</div>') if msg else ''}
+      <div class="small">{stats}</div>
+      <div class="small">対象外：結果未登録 {skipped['no_result']}件、発走後の予想・時刻不正 {skipped['not_pre_race']}件、
+      不正なデータ {skipped['invalid']}件、買い目なし {skipped['no_bets']}件</div></div>
+      <div class="card"><div class="title">① 過去の確定ワイド払戻を取り込む</div>
+      <div class="small">日付・競馬場・レース番号・発走時刻・ワイドの組合せ・100円あたり払戻金を入力したCSVを使います。
+      取り込むデータの利用権限と正確性を確認してください。既存結果は同じレース番号なら更新されます。</div>
+      <div class="actions"><a class="btn secondary" href="/history-lab/template/results">結果CSVのひな形</a></div>
+      <form method="post" action="/history-lab/import/results" enctype="multipart/form-data">
+      <input type="file" name="csv_file" accept=".csv,text/csv" required><button type="submit">過去結果CSVを取り込む</button></form></div>
+      <div class="card"><div class="title">② 当時の予想記録を取り込む（任意）</div>
+      <div class="small">既存v52.3・v52.4の初回記録は自動で照合対象になります。
+      それ以外の方式は「予想時刻と買い目が当時保存されたCSV」だけ取り込んでください。
+      発走時刻より前の記録だけ集計します。後付けの予想は検証できません。</div>
+      <div class="actions"><a class="btn secondary" href="/history-lab/template/predictions">予想CSVのひな形</a></div>
+      <form method="post" action="/history-lab/import/predictions" enctype="multipart/form-data">
+      <input type="file" name="csv_file" accept=".csv,text/csv" required><button type="submit">過去予想CSVを取り込む</button></form></div>
+      <div class="card">{history_lab_table(rows,'全期間の仮想回収率')}</div>
+      <div class="card">{history_lab_table(rows,'競馬場別の仮想回収率','course')}</div>
+      <div class="card">{history_lab_table(rows,'距離別の仮想回収率','distance')}</div>
+      <div class="card">{history_lab_table(rows,'馬場状態別の仮想回収率','going')}</div>
+      <div class="card"><div class="small">{html.escape(split_text)}</div>
+      {history_lab_table(by_date['early'],'時系列・古い期間')}
+      {history_lab_table(by_date['later'],'時系列・新しい期間（検証）')}</div>
+      <div class="card"><div class="title">③ バックアップ</div>
+      <div class="actions"><a class="btn secondary" href="/history-lab/export/results">結果CSVを保存</a>
+      <a class="btn secondary" href="/history-lab/export/predictions">CSV予想を保存</a></div>
+      <div class="note">Render無料プランのローカルSQLiteは再起動・再デプロイで消える可能性があります。
+      取り込んだCSVは必ず手元に保管してください。旧v52.4の記録はこの2つのCSVには含まれません。</div>
+      <div class="small">過去の着順や払戻だけから当時の能力指数を復元する機能は未実装です。
+      回収率100%超えは保証されません。時系列の後半データで検証してから判断してください。</div></div>""",'v52.5 過去データ検証')
+
+
+@app.post('/history-lab/import/<kind>')
+def history_lab_import(kind):
+    if kind not in ('results','predictions'):
+        return 'not found',404
+    f=request.files.get('csv_file')
+    if not f or not str(f.filename).lower().endswith('.csv'):
+        return page('<div class="bad">CSVファイルを選んでください。</div><a href="/history-lab">戻る</a>'),400
+    try:
+        blob=f.stream.read(2_000_001)
+        parsed=(parse_results(blob,NAR_COURSE_CODES) if kind=='results'
+                else parse_predictions(blob,NAR_COURSE_CODES))
+        if not parsed:
+            raise ValueError('有効な行がありません')
+        with db() as con:
+            if kind=='results':
+                con.executemany("""INSERT INTO history_results
+                (race_date,course,race,start_time,payouts,source,distance_m,runners,going,imported_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(race_date,course,race)
+                DO UPDATE SET start_time=excluded.start_time,payouts=excluded.payouts,
+                source=excluded.source,distance_m=excluded.distance_m,
+                runners=excluded.runners,going=excluded.going,imported_at=excluded.imported_at""",
+                [(*r,now().strftime('%Y-%m-%d %H:%M:%S')) for r in parsed])
+            else:
+                con.executemany("""INSERT INTO history_predictions
+                (race_date,course,race,mode,strategy,prediction_at,bets,imported_at)
+                VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(race_date,course,race,mode,strategy) DO NOTHING""",
+                [(*r,now().strftime('%Y-%m-%d %H:%M:%S')) for r in parsed])
+        return redirect('/history-lab?'+urllib.parse.urlencode({'msg':f'{len(parsed)}行を読み込みました（重複分は更新またはスキップ）'}))
+    except (ValueError,sqlite3.Error) as exc:
+        return page('<div class="bad">取り込みエラー：'+html.escape(str(exc))+
+                    '</div><a class="btn secondary" href="/history-lab">戻る</a>'),400
+
+
+def history_lab_csv(columns, rows, filename):
+    output=io.StringIO()
+    writer=csv.writer(output)
+    writer.writerow(columns)
+    writer.writerows(rows)
+    return Response('﻿'+output.getvalue(),mimetype='text/csv; charset=utf-8',
+                    headers={'Content-Disposition':f'attachment; filename="{filename}"',
+                             'Cache-Control':'no-store'})
+
+
+@app.get('/history-lab/template/<kind>')
+def history_lab_template(kind):
+    if kind=='results':
+        return history_lab_csv(RESULT_FIELDS,[], 'wide_results_template.csv')
+    if kind=='predictions':
+        return history_lab_csv(PRED_FIELDS,[], 'wide_predictions_template.csv')
+    return 'not found',404
+
+
+@app.get('/history-lab/export/<kind>')
+def history_lab_export(kind):
+    with db() as con:
+        if kind=='results':
+            rows=con.execute('SELECT * FROM history_results ORDER BY race_date,course,race').fetchall()
+            data=[]
+            for r in rows:
+                payouts=json.loads(r['payouts'])
+                pairs=list(payouts.items())[:3]
+                data.append([r['race_date'],r['course'],r['race'],r['start_time']]+[
+                    val for i in range(3) for val in (pairs[i] if i<len(pairs) else ('',''))]+[r['source'],r['distance_m'] or '',r['runners'] or '',r['going']])
+            return history_lab_csv(RESULT_FIELDS,data,'wide_results_backup.csv')
+        if kind=='predictions':
+            rows=con.execute('SELECT * FROM history_predictions ORDER BY race_date,course,race').fetchall()
+            data=[]
+            for r in rows:
+                bets=json.loads(r['bets'])
+                data.append([r['race_date'],r['course'],r['race'],r['mode'],r['strategy'],r['prediction_at']]+
+                    [bets[i]['combo'] if i<len(bets) else '' for i in range(6)]+
+                    [bets[i]['amount'] if i<len(bets) else '' for i in range(6)])
+            return history_lab_csv(PRED_FIELDS,data,'wide_predictions_backup.csv')
+    return 'not found',404
 
 
 @app.get("/health")
