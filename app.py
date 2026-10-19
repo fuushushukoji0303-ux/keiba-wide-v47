@@ -17,6 +17,8 @@
 - SPAT4のログイン情報は保存しません。
 """
 from __future__ import annotations
+import re
+import datetime
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -5028,6 +5030,7 @@ def all_batch():
       <div class="note" id="batch-status" role="status" aria-live="polite">本日の開催を確認しています…</div>
       <div class="small">発走時刻はNAR公式の予定時刻で、投票締切ではありません。オッズが未発売・締切後・取得不可のレースは予想を作らず理由を表示します。自動投票はしません。</div>
     </div>
+    <p><a class="btn secondary" href="/v529/today">v52.9 保存済みの本日予想を確認</a></p>
     <div class="batch-grid" id="all-batch-cards"></div>
     <script>
     (function(){
@@ -5213,6 +5216,7 @@ def all_batch_race():
         payload.update(status='ok',grade=result.get('grade','－'),score=result.get('score',0),
             axis_no=axis_no,axis_name=axis_name,ability_status=ability_status,ability_message=ability_message,
             picks=[{'combo':x.get('combo',''),'odds':x.get('display','')} for x in result.get('recommendations',[])[:3]])
+        v529_capture_snapshot(payload)
         return jsonify(payload)
     except Exception as exc:
         payload.update(status='error',message=f'{type(exc).__name__}: {exc}'[:200])
@@ -5978,3 +5982,174 @@ def health():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "8080"))
     app.run(host="0.0.0.0", port=port)
+
+
+# v52.9 phase 1: immutable first pre-race prediction snapshot.
+def v529_init():
+    with db() as con:
+        con.execute("""CREATE TABLE IF NOT EXISTS v529_snapshots (
+          race_date TEXT NOT NULL, course TEXT NOT NULL, race INTEGER NOT NULL,
+          captured_at TEXT NOT NULL, start_time TEXT NOT NULL,
+          status TEXT NOT NULL, grade TEXT, score INTEGER,
+          axis_no INTEGER, picks_json TEXT NOT NULL,
+          variable_json TEXT NOT NULL, screen_json TEXT NOT NULL,
+          PRIMARY KEY(race_date, course, race))""")
+
+v529_init()
+
+def v529_capture_snapshot(payload):
+    # The server—not the browser—checks the deadline. No post-race snapshots.
+    try:
+        if payload.get('status')!='ok':return
+        start=str(payload.get('start_time',''))
+        if not re.fullmatch(r'\d{2}:\d{2}',start):return
+        deadline=datetime.datetime.strptime(today()+' '+start,'%Y-%m-%d %H:%M')
+        current=now()
+        if current.tzinfo is not None:
+            current=current.replace(tzinfo=None)
+        if current>=deadline:return
+        course=str(payload.get('course',''))
+        race=int(payload.get('race',0))
+        if course not in NAR_COURSE_CODES or not 1<=race<=12:return
+        with db() as con:
+            con.execute("""INSERT OR IGNORE INTO v529_snapshots
+            (race_date,course,race,captured_at,start_time,status,grade,score,axis_no,picks_json,variable_json,screen_json)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",(
+              today(),course,race,now().isoformat(),start,'ok',str(payload.get('grade','')),
+              int(payload.get('score',0)),int(payload.get('axis_no') or 0),
+              json.dumps(payload.get('picks',[]),ensure_ascii=False),
+              json.dumps(payload.get('variable_strategy') or {},ensure_ascii=False),
+              json.dumps(payload.get('v524_screen') or {},ensure_ascii=False)))
+    except Exception:
+        app.logger.exception('v52.9 snapshot capture failed')
+
+@app.get('/v529/today')
+def v529_today():
+    with db() as con:
+        rows=con.execute('SELECT * FROM v529_snapshots WHERE race_date=? ORDER BY course,race',(today(),)).fetchall()
+    cells=[]
+    for r in rows:
+        try:
+            screen=json.loads(r['screen_json'])
+            status=str(screen.get('status',''))
+            bets=', '.join(str(x.get('combo','')) for x in screen.get('pairs',[]))
+        except Exception:status='';bets=''
+        cells.append('<tr><td>'+html.escape(str(r['course']))+'</td><td>'+str(r['race'])+'R</td><td>'+html.escape(str(r['start_time']))+'</td><td>'+html.escape(str(r['captured_at']))+'</td><td>'+html.escape(str(r['grade']))+'</td><td>'+html.escape(status)+'</td><td>'+html.escape(bets)+'</td></tr>')
+    body=('<div class="card"><h2>v52.9 本日の予想保存（第1段階）</h2>'
+      +'<p>全レース一括予想で取得できたレースを、発走前に限り最初の1回だけ自動保存します。</p>'
+      +'<p>同じ日の同じレースを再取得しても最初の保存内容は変更しません。</p>'
+      +'<p>保存済み：'+str(len(rows))+'レース</p>'
+      +'<p>まだ結果との自動照合・回収率集計は未実装です。サーバーの保存領域が初期化されると記録が失われる可能性があります。</p>'
+      +'<p><a class="btn green" href="/v529/validation">本日の全レース検証へ</a> <a class="btn secondary" href="/all-batch">全レース一括予想に戻る</a></p></div>'
+      +'<div class="card"><div style="overflow-x:auto"><table><thead><tr><th>競馬場</th><th>R</th><th>発走</th><th>保存日時</th><th>評価</th><th>検証用判定</th><th>検証用買い目</th></tr></thead><tbody>'
+      +''.join(cells)+'</tbody></table></div></div>')
+    return page(body,'v52.9 本日の予想保存')
+
+
+
+# v52.9 phase 2: immutable snapshot result reconciliation and hypothetical accounting.
+def v529_phase2_init():
+    with db() as con:
+        con.execute("""CREATE TABLE IF NOT EXISTS v529_settlements (
+            race_date TEXT NOT NULL, course TEXT NOT NULL, race INTEGER NOT NULL,
+            settled_at TEXT NOT NULL, official_json TEXT NOT NULL,
+            strategy_json TEXT NOT NULL, screen_json TEXT NOT NULL,
+            PRIMARY KEY(race_date,course,race),
+            FOREIGN KEY(race_date,course,race) REFERENCES v529_snapshots(race_date,course,race))""")
+
+v529_phase2_init()
+
+def v529_evaluate_pairs(pairs, refunds):
+    clean=[]; seen=set()
+    for item in (pairs or []):
+        if not isinstance(item,dict):continue
+        combo=normalize_wide_combo(item.get('combo',''))
+        if not combo or combo in seen:continue
+        seen.add(combo)
+        amount=to_int(item.get('amount'),100)
+        if amount<=0 or amount%100!=0:continue
+        clean.append((combo,amount))
+    stake=sum(a for _,a in clean)
+    returned=sum(int(refunds.get(c,0))*(a//100) for c,a in clean)
+    hits=sum(1 for c,_ in clean if c in refunds)
+    return {'bets':len(clean),'stake':stake,'returned':returned,'profit':returned-stake,
+            'hits':hits,'hit':bool(hits),'pairs':[{'combo':c,'amount':a} for c,a in clean]}
+
+def v529_settle_one(r):
+    refunds=nar_get_wide_refunds(r['course'],int(r['race']),r['race_date'])
+    if not refunds:return False
+    try:
+        variable=json.loads(r['variable_json'] or '{}')
+        screen=json.loads(r['screen_json'] or '{}')
+        strat=v529_evaluate_pairs(variable.get('pairs',[]),refunds)
+        selected=v529_evaluate_pairs(screen.get('pairs',[]),refunds)
+        with db() as con:
+            con.execute("""INSERT OR IGNORE INTO v529_settlements
+                (race_date,course,race,settled_at,official_json,strategy_json,screen_json)
+                VALUES (?,?,?,?,?,?,?)""",(r['race_date'],r['course'],r['race'],now().isoformat(),
+                json.dumps(refunds,ensure_ascii=False),json.dumps(strat,ensure_ascii=False),
+                json.dumps(selected,ensure_ascii=False)))
+        return True
+    except Exception:
+        app.logger.exception('v529 settle error')
+        return False
+
+def v529_aggregate(records,kind):
+    bets=stake=returned=hits=hit_races=0
+    for r in records:
+        d=json.loads(r[kind]);bets+=d['bets'];stake+=d['stake'];returned+=d['returned'];hits+=d['hits'];hit_races+=int(d['hit'])
+    return {'races':len(records),'bets':bets,'stake':stake,'returned':returned,
+            'profit':returned-stake,'hits':hits,'hit_races':hit_races,
+            'roi':round(100*returned/stake,1) if stake else None}
+
+@app.route('/v529/validation',methods=['GET','POST'])
+def v529_validation():
+    date=request.values.get('date',today()).strip()
+    if not re.fullmatch(r'20\d{2}-\d{2}-\d{2}',date):date=today()
+    # Do not reconcile future races or a date after today.
+    if date>today():date=today()
+    notice=''
+    if request.method=='POST':
+        # One-click batch; official server calls are capped to avoid long timeouts.
+        with db() as con:
+            pending=con.execute("""SELECT s.* FROM v529_snapshots s
+                LEFT JOIN v529_settlements v ON v.race_date=s.race_date AND v.course=s.course AND v.race=s.race
+                WHERE s.race_date=? AND v.race_date IS NULL ORDER BY s.course,s.race LIMIT 36""",(date,)).fetchall()
+        completed=0
+        for r in pending:
+            if date==today():
+                try:
+                    if now().strftime('%H:%M') <= r['start_time']:continue
+                except Exception:continue
+            if v529_settle_one(r):completed+=1
+        notice=f'公式払戻を照合：{completed}レース確定／今回確認した{len(pending)}レース。未確定・取得不可は保留します。'
+    with db() as con:
+        snapshots=con.execute('SELECT * FROM v529_snapshots WHERE race_date=? ORDER BY course,race',(date,)).fetchall()
+        rows=con.execute("""SELECT s.course,s.race,s.start_time,s.grade,v.strategy_json,v.screen_json,v.official_json
+            FROM v529_settlements v JOIN v529_snapshots s
+            ON v.race_date=s.race_date AND v.course=s.course AND v.race=s.race
+            WHERE s.race_date=? ORDER BY s.course,s.race""",(date,)).fetchall()
+    def fmt(n):return f'{n:,}円'
+    def percent(a):return '—' if a['roi'] is None else f'{a["roi"]:.1f}%'
+    def stats(name,kind,rs):
+        a=v529_aggregate(rs,kind)
+        return '<tr><td>'+html.escape(name)+'</td><td>'+str(a['races'])+'</td><td>'+str(a['bets'])+'</td><td>'+str(a['hit_races'])+'</td><td>'+fmt(a['stake'])+'</td><td>'+fmt(a['returned'])+'</td><td>'+fmt(a['profit'])+'</td><td>'+percent(a)+'</td></tr>'
+    summaries=stats('可変戦略の全候補（仮想）','strategy_json',rows)+stats('保守的な購入候補（仮想）','screen_json',rows)
+    by_course={}
+    for r in rows:by_course.setdefault(r['course'],[]).append(r)
+    course_rows=''.join(stats(c,'strategy_json',rs) for c,rs in sorted(by_course.items()))
+    details=[]
+    for r in rows:
+        a=json.loads(r['strategy_json']);b=json.loads(r['screen_json'])
+        details.append('<tr><td>'+html.escape(r['course'])+'</td><td>'+str(r['race'])+'R</td><td>'+html.escape(str(r['grade']))+'</td><td>'+str(a['bets'])+'</td><td>'+fmt(a['stake'])+'</td><td>'+fmt(a['returned'])+'</td><td>'+fmt(a['profit'])+'</td><td>'+str(b['bets'])+'</td><td>'+fmt(b['returned'])+'</td></tr>')
+    body=("""<div class="card"><h2>v52.9 本日の全レース検証（第2段階）</h2>
+    <p>発走前に保存された予想だけをNAR公式ワイド払戻と照合します。結果から予想を作り直しません。</p>
+    <p>※購入ではなく1点100円の仮想成績。保守的な候補は見送りなら投資0円です。払戻未確定・取得不可は集計しません。</p>"""
+    +'<form method="GET" action="/v529/validation"><label>検証日 <input type="date" name="date" value="'+html.escape(date)+'"></label> <button>表示</button></form>'
+    +'<form method="POST" action="/v529/validation"><input type="hidden" name="date" value="'+html.escape(date)+'"><button class="green">公式結果を照合（最大36レース）</button></form>'
+    +'<p>'+html.escape(notice)+'</p><p>予想保存 '+str(len(snapshots))+'レース ／ 結果照合済み '+str(len(rows))+'レース ／ 未照合 '+str(len(snapshots)-len(rows))+'レース</p>'
+    +'<p><a class="btn secondary" href="/v529/today">本日の予想保存一覧</a></p></div>'
+    +'<div class="card"><h3>買い方別の成績</h3><div style="overflow-x:auto"><table><thead><tr><th>買い方</th><th>確定R</th><th>点数</th><th>的中R</th><th>投資</th><th>払戻</th><th>損益</th><th>回収率</th></tr></thead><tbody>'+summaries+'</tbody></table></div></div>'
+    +'<div class="card"><h3>競馬場別（可変戦略の全候補）</h3><div style="overflow-x:auto"><table><thead><tr><th>競馬場</th><th>確定R</th><th>点数</th><th>的中R</th><th>投資</th><th>払戻</th><th>損益</th><th>回収率</th></tr></thead><tbody>'+course_rows+'</tbody></table></div></div>'
+    +'<div class="card"><h3>レース別</h3><div style="overflow-x:auto"><table><thead><tr><th>競馬場</th><th>R</th><th>評価</th><th>候補点数</th><th>投資</th><th>払戻</th><th>損益</th><th>保守点数</th><th>保守払戻</th></tr></thead><tbody>'+''.join(details)+'</tbody></table></div></div>')
+    return page(body,'v52.9 本日の全レース検証')
