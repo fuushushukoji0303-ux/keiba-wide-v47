@@ -6003,7 +6003,7 @@ def v529_capture_snapshot(payload):
         if payload.get('status')!='ok':return
         start=str(payload.get('start_time',''))
         if not re.fullmatch(r'\d{2}:\d{2}',start):return
-        deadline=datetime.datetime.strptime(today()+' '+start,'%Y-%m-%d %H:%M')
+        deadline=datetime.strptime(today()+' '+start,'%Y-%m-%d %H:%M')
         current=now()
         if current.tzinfo is not None:
             current=current.replace(tzinfo=None)
