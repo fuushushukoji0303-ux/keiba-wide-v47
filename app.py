@@ -6260,8 +6260,8 @@ def v529_archive():
         '<p><strong>注意：</strong>Render無料プランでは、デプロイ・再起動後にローカルデータが消えることがあります。'
         'ここに出てこない日付の予想を、この画面から復元することはできません。</p>'
         '<p><a class="btn green" href="/v529/archive/export">全日付のCSVを保存</a> '
-        '<a class="btn secondary" href="/v529/today">本日の予想保存へ</a></p>'
-        '<div style="overflow-x:auto"><table><thead><tr><th>保存日</th><th>レース数</th><th>詳細</th><th>バックアップ</th></tr></thead><tbody>'
+        '<a class="btn secondary" href="/v529/today">本日の予想保存へ</a> '
+        '<a class="btn secondary" href="/v529/archive/import">CSVから復元</a></p>' '<div style="overflow-x:auto"><table><thead><tr><th>保存日</th><th>レース数</th><th>詳細</th><th>バックアップ</th></tr></thead><tbody>'
         +daily_html+'</tbody></table></div></div>')
     if date:
         body+=('<div class="card"><h3>'+esc(date)+' の保存記録（'+str(len(rows))+'レース）</h3>'
@@ -6298,3 +6298,102 @@ def v529_archive_export():
     return Response('\ufeff'+buf.getvalue(), mimetype='text/csv; charset=utf-8',
                     headers={'Content-Disposition':'attachment; filename="'+filename+'"',
                              'Cache-Control':'no-store'})
+
+
+
+# v52.9 Phase 5: restore the snapshots CSV exported by this app.
+# There is deliberately no overwrite/merge of existing predictions.
+@app.route('/v529/archive/import', methods=['GET', 'POST'])
+def v529_archive_import():
+    import secrets
+    from datetime import date as _date_cls
+    escape = html.escape
+    token = session.get('v529_import_token')
+    if not token:
+        token = secrets.token_urlsafe(24)
+        session['v529_import_token'] = token
+    status_text = ''
+    success = False
+    cols = ('race_date','course','race','captured_at','start_time','status','grade',
+            'score','axis_no','picks_json','variable_json','screen_json')
+    if request.method == 'POST':
+        try:
+            # Import is disabled if app member authentication has not been configured.
+            if not LOGIN_ENABLED or session.get('member_authenticated') is not True:
+                raise ValueError('復元するにはRenderに会員ログインを設定してログインしてください。')
+            if not secrets.compare_digest(str(request.form.get('csrf','')),token):
+                raise ValueError('画面の有効期限が切れました。ページを開き直してください。')
+            f=request.files.get('backup')
+            if not f or not f.filename.lower().endswith('.csv'):
+                raise ValueError('このアプリから書き出したCSVファイルを選んでください。')
+            content=f.stream.read(8*1024*1024+1)
+            if len(content)>8*1024*1024:
+                raise ValueError('CSVが8MBを超えています。日付ごとに分割して書き出してください。')
+            records=list(csv.DictReader(io.StringIO(content.decode('utf-8-sig'),newline='')))
+            if not records:
+                raise ValueError('CSVに予想記録がありません。')
+            if len(records)>6000:
+                raise ValueError('1回に復元できるのは6000レースまでです。')
+            if tuple(records[0].keys())!=cols:
+                raise ValueError('CSVの項目が一致しません。v52.9の保存履歴から書き出したCSVのみ使用できます。')
+            values=[]
+            seen=set()
+            for idx,r in enumerate(records,2):
+                d=str(r['race_date']); course=str(r['course'])
+                try:
+                    parsed=_date_cls.fromisoformat(d)
+                    if parsed.isoformat()!=d: raise ValueError()
+                    race=int(r['race']); score=int(r['score'] or 0); axis=int(r['axis_no'] or 0)
+                    cap=datetime.fromisoformat(r['captured_at'])
+                    st=datetime.strptime(r['start_time'],'%H:%M').time()
+                    if cap.tzinfo is None: cap=cap.replace(tzinfo=JST)
+                    cutoff=datetime.combine(parsed,st,tzinfo=JST)
+                    if cap.astimezone(JST)>=cutoff: raise ValueError()
+                except (ValueError,TypeError,OverflowError):
+                    raise ValueError(f'{idx}行目の日付・発走時刻・保存日時・数値を確認してください。')
+                if course not in NAR_COURSE_CODES or not 1<=race<=12 or r['status']!='ok':
+                    raise ValueError(f'{idx}行目の競馬場・レース・状態が不正です。')
+                if not (-10000<=score<=10000 and 0<=axis<=20):
+                    raise ValueError(f'{idx}行目の指数・軸馬番号が不正です。')
+                for key in ('picks_json','variable_json','screen_json'):
+                    try:
+                        data=json.loads(r[key])
+                    except (ValueError,TypeError):
+                        raise ValueError(f'{idx}行目の予想データ形式が不正です。')
+                    if len(r[key])>200000:
+                        raise ValueError(f'{idx}行目の予想データが大きすぎます。')
+                    if key=='picks_json' and not isinstance(data,list):
+                        raise ValueError(f'{idx}行目の予想候補が不正です。')
+                    if key!='picks_json' and not isinstance(data,dict):
+                        raise ValueError(f'{idx}行目の予想詳細が不正です。')
+                ident=(d,course,race)
+                if ident in seen: raise ValueError(f'{idx}行目に同一レースの重複があります。')
+                seen.add(ident)
+                values.append((d,course,race,r['captured_at'],r['start_time'],'ok',
+                  r['grade'],score,axis,r['picks_json'],r['variable_json'],r['screen_json']))
+            with db() as con:
+                before=con.total_changes
+                con.executemany("""INSERT OR IGNORE INTO v529_snapshots
+                  (race_date,course,race,captured_at,start_time,status,grade,score,axis_no,picks_json,variable_json,screen_json)
+                  VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",values)
+                inserted=con.total_changes-before
+            status_text=f'復元完了：新規 {inserted} レース／既存のため変更なし {len(values)-inserted} レース。予想内容は上書きしていません。'
+            success=True
+        except UnicodeDecodeError:
+            status_text='CSVをUTF-8として読み込めませんでした。アプリから書き出した元のCSVを選んでください。'
+        except ValueError as e:
+            status_text=str(e)
+        except Exception:
+            app.logger.exception('v52.9 archive CSV import failed')
+            status_text='復元時にエラーが発生しました。データは変更されていない可能性があります。ログを確認してください。'
+    msg=('<p><strong>'+escape(status_text)+'</strong></p>') if status_text else ''
+    body=('<div class="card"><h2>v52.9 予想CSVバックアップの復元</h2>'
+          '<p>「保存履歴」から書き出したCSVのみ対応しています。既存レースは変更しません。</p>'
+          '<p>発走前に保存された予想のみ復元します。結果・払戻記録は含みません。</p>'
+          +msg+
+          '<form method="POST" enctype="multipart/form-data">'
+          '<input type="hidden" name="csrf" value="'+escape(token,quote=True)+'">'
+          '<input type="file" name="backup" accept=".csv,text/csv" required>'
+          '<button type="submit" class="green">CSVから復元する</button></form>'
+          '<p><a class="btn secondary" href="/v529/archive">保存履歴へ戻る</a></p></div>')
+    return page(body,'予想CSV復元')
