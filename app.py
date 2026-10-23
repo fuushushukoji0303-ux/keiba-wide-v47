@@ -6153,6 +6153,7 @@ def v529_validation():
     +'<div class="card"><h3>競馬場別（可変戦略の全候補）</h3><div style="overflow-x:auto"><table><thead><tr><th>競馬場</th><th>確定R</th><th>点数</th><th>的中R</th><th>投資</th><th>払戻</th><th>損益</th><th>回収率</th></tr></thead><tbody>'+course_rows+'</tbody></table></div></div>'
     +'<div class="card"><h3>レース別</h3><div style="overflow-x:auto"><table><thead><tr><th>競馬場</th><th>R</th><th>評価</th><th>候補点数</th><th>投資</th><th>払戻</th><th>損益</th><th>保守点数</th><th>保守払戻</th></tr></thead><tbody>'+''.join(details)+'</tbody></table></div></div>')
     body += '<p><a class="btn secondary" href="/v529/axis2-report">v52.3 軸流し2点の重点検証へ</a></p>'
+    body += '<p><a class="btn green" href="/v529/axis2-side-by-side">v52.3軸流し2点と従来3点を同じレースで比較</a></p>'
     return page(body,'v52.9 本日の全レース検証')
 
 
@@ -6225,6 +6226,86 @@ def v529_axis2_report():
     return page(body,'v52.9 軸流し2点の重点検証')
 
 
+
+
+# ===== v52.9 第6段階：同一レースの軸流し2点と従来3点・並列検証 =====
+@app.get('/v529/axis2-side-by-side')
+def v529_axis2_side_by_side():
+    """Only compare immutable pre-race snapshots on races with confirmed payouts.
+
+    Neither method's bets are selected using finishing order. Baseline is the
+    3 pre-saved suggestions; no third bet is invented for v52.3.
+    """
+    with db() as con:
+        rows=con.execute("""SELECT s.race_date,s.course,s.race,s.captured_at,
+          s.start_time,s.variable_json,s.picks_json,v.official_json
+          FROM v529_snapshots s JOIN v529_settlements v
+          ON s.race_date=v.race_date AND s.course=v.course AND s.race=v.race
+          ORDER BY s.race_date,s.course,s.race""").fetchall()
+    table={}; detail=[]; dropped={'時刻不正・発走後':0,'軸流し2点ではない':0,'買い目が不足':0,'結果不正':0}
+    def accumulate(group,lab,out):
+        a=group.setdefault(lab,dict(races=0,hit=0,stake=0,returned=0))
+        a['races']+=1;a['hit']+=int(out['hit'])
+        a['stake']+=out['stake'];a['returned']+=out['returned']
+    for r in rows:
+        try:
+            captured=datetime.fromisoformat(str(r['captured_at']))
+            deadline=datetime.strptime(str(r['race_date'])+' '+str(r['start_time']), '%Y-%m-%d %H:%M')
+            if captured.date().isoformat()!=str(r['race_date']) or captured.replace(tzinfo=None)>=deadline:
+                dropped['時刻不正・発走後']+=1;continue
+            variable=json.loads(r['variable_json'] or '{}')
+            if variable.get('type')!='軸流し':
+                dropped['軸流し2点ではない']+=1;continue
+            two=variable.get('pairs',[])
+            old=json.loads(r['picks_json'] or '[]')
+            if not isinstance(two,list) or not isinstance(old,list):
+                dropped['買い目が不足']+=1;continue
+            two_pairs=[{'combo':x.get('combo',''),'amount':100} for x in two if isinstance(x,dict)]
+            old_pairs=[{'combo':x.get('combo',''),'amount':100} for x in old if isinstance(x,dict)]
+            refunds=json.loads(r['official_json'] or '{}')
+            if not isinstance(refunds,dict) or not refunds:
+                dropped['結果不正']+=1;continue
+            t=v529_evaluate_pairs(two_pairs,refunds)
+            b=v529_evaluate_pairs(old_pairs,refunds)
+            if t['bets']!=2 or b['bets']!=3:
+                dropped['買い目が不足']+=1;continue
+            course=str(r['course'])
+            for scope in ('全競馬場',course):
+                entry=table.setdefault(scope,{})
+                accumulate(entry,'軸流し2点',t)
+                accumulate(entry,'従来3点',b)
+            detail.append((r,t,b))
+        except (ValueError,TypeError,KeyError,AttributeError):
+            dropped['結果不正']+=1
+    def stats(label,a):
+        n=a['races'];st=a['stake'];ret=a['returned']
+        return ('<tr><td>'+html.escape(label)+'</td><td>'+str(n)+'</td>'
+             +'<td>'+str(a['hit'])+'</td><td>'+(f'{100*a["hit"]/n:.1f}%' if n else '—')+'</td>'
+             +'<td>'+f'{st:,}円</td><td>'+f'{ret:,}円</td>'
+             +'<td>'+f'{ret-st:+,}円</td><td>'+(f'{100*ret/st:.1f}%' if st else '—')+'</td></tr>')
+    heads='<tr><th>方式</th><th>対象R</th><th>的中R</th><th>的中率</th><th>投資</th><th>払戻</th><th>収支</th><th>回収率</th></tr>'
+    sections=[]
+    for c in ['全競馬場']+sorted(k for k in table if k!='全競馬場'):
+        a=table.get(c,{})
+        sections.append('<div class="card"><h3>'+html.escape(c)+'</h3><div class="scroll"><table>'
+           +heads+''.join(stats(n,a[n]) for n in ('軸流し2点','従来3点') if n in a)
+           +'</table></div></div>')
+    if not detail:sections.append('<div class="card">比較可能な確定レースがまだありません。</div>')
+    recent=''.join('<tr><td>'+html.escape(str(r['race_date']))+'</td><td>'+html.escape(str(r['course']))
+          +'</td><td>'+str(r['race'])+'R</td><td>'+str(t['returned'])+'円</td><td>'
+          +str(b['returned'])+'円</td></tr>' for r,t,b in detail[-100:])
+    drops='／'.join(html.escape(k)+':'+str(v) for k,v in dropped.items())
+    body=("""<div class="card"><h2>v52.9 同一レース比較：v52.3軸流し2点 vs 従来ワイド3点</h2>
+      <p>発走前に保存した「軸流し2点」と「従来のワイド3点」を、同じレースの確定ワイド払戻で比較します。各組合せ100円の仮想投資です。</p>
+      <p>※軸流し2点が発走前に実際に選ばれ、従来の3点も保存されているレースだけが対象です。後から都合の良い馬を選び直しません。</p>
+      <p>※結果未照合のレースは含みません。的中率は1点以上的中したレースの割合。回収率は払戻÷投資。対象の限定による選択バイアスがあります。</p>
+      <p>※少数例の比較に過ぎず、利益を保証しません。実際の購入処理には影響しません。</p>
+      <p><a class="btn secondary" href="/v529/validation">結果照合へ</a> <a class="btn secondary" href="/v529/axis2-report">買い方別の成績へ</a> <a class="btn secondary" href="/v529/archive">CSVバックアップへ</a></p>
+      </div>"""
+      +'<div class="card"><p>確定記録 '+str(len(rows))+'レース／比較可能 '+str(len(detail))+'レース</p><p>対象外内訳：'+drops+'</p></div>'
+      +''.join(sections)
+      +'<div class="card"><h3>直近の比較対象（最大100レース）</h3><div class="scroll"><table><tr><th>日付</th><th>競馬場</th><th>R</th><th>2点払戻</th><th>3点払戻</th></tr>'+recent+'</table></div></div>')
+    return page(body,'v52.9 軸流し2点の同一レース比較')
 
 # v52.9 Phase 4 — archive viewer and read-only CSV export.
 # No prediction records are generated or altered by either route.
