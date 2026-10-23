@@ -6040,7 +6040,7 @@ def v529_today():
       +'<p>同じ日の同じレースを再取得しても最初の保存内容は変更しません。</p>'
       +'<p>保存済み：'+str(len(rows))+'レース</p>'
       +'<p>まだ結果との自動照合・回収率集計は未実装です。サーバーの保存領域が初期化されると記録が失われる可能性があります。</p>'
-      +'<p><a class="btn green" href="/v529/validation">本日の全レース検証へ</a> <a class="btn secondary" href="/all-batch">全レース一括予想に戻る</a></p></div>'
+      +'<p><a class="btn green" href="/v529/validation">本日の全レース検証へ</a> <a class="btn secondary" href="/v529/archive">過去の保存履歴とCSV出力</a> <a class="btn secondary" href="/all-batch">全レース一括予想に戻る</a></p></div>'
       +'<div class="card"><div style="overflow-x:auto"><table><thead><tr><th>競馬場</th><th>R</th><th>発走</th><th>保存日時</th><th>評価</th><th>検証用判定</th><th>検証用買い目</th></tr></thead><tbody>'
       +''.join(cells)+'</tbody></table></div></div>')
     return page(body,'v52.9 本日の予想保存')
@@ -6152,4 +6152,149 @@ def v529_validation():
     +'<div class="card"><h3>買い方別の成績</h3><div style="overflow-x:auto"><table><thead><tr><th>買い方</th><th>確定R</th><th>点数</th><th>的中R</th><th>投資</th><th>払戻</th><th>損益</th><th>回収率</th></tr></thead><tbody>'+summaries+'</tbody></table></div></div>'
     +'<div class="card"><h3>競馬場別（可変戦略の全候補）</h3><div style="overflow-x:auto"><table><thead><tr><th>競馬場</th><th>確定R</th><th>点数</th><th>的中R</th><th>投資</th><th>払戻</th><th>損益</th><th>回収率</th></tr></thead><tbody>'+course_rows+'</tbody></table></div></div>'
     +'<div class="card"><h3>レース別</h3><div style="overflow-x:auto"><table><thead><tr><th>競馬場</th><th>R</th><th>評価</th><th>候補点数</th><th>投資</th><th>払戻</th><th>損益</th><th>保守点数</th><th>保守払戻</th></tr></thead><tbody>'+''.join(details)+'</tbody></table></div></div>')
+    body += '<p><a class="btn secondary" href="/v529/axis2-report">v52.3 軸流し2点の重点検証へ</a></p>'
     return page(body,'v52.9 本日の全レース検証')
+
+
+# ===== v52.9 第3段階：保存済みv52.3買い方の前向き比較（購入処理は変更しない） =====
+@app.get('/v529/axis2-report')
+def v529_axis2_report():
+    """Immutable pre-race snapshots + settled official payouts, grouped by actual bet type.
+
+    Compare independently observed strategies; do not synthesize 3-point bets from 2-point
+    snapshots, and do not retrospectively reselect the better method for each race.
+    """
+    with db() as con:
+        rows=con.execute("""SELECT s.race_date,s.course,s.race,s.captured_at,s.start_time,
+                   s.variable_json,v.strategy_json
+                   FROM v529_snapshots s JOIN v529_settlements v
+                   ON s.race_date=v.race_date AND s.course=v.course AND s.race=v.race
+                   ORDER BY s.race_date,s.course,s.race""").fetchall()
+    groups={}
+    by_course={}
+    details=[]
+    excluded=0
+    def add(store,key,d):
+        a=store.setdefault(key,{'races':0,'hits':0,'stake':0,'returned':0,'bets':0})
+        a['races']+=1;a['hits']+=int(d.get('hit',False))
+        a['stake']+=int(d.get('stake',0));a['returned']+=int(d.get('returned',0))
+        a['bets']+=int(d.get('bets',0))
+    for r in rows:
+        try:
+            captured=datetime.fromisoformat(str(r['captured_at']))
+            # Prevent an old or malformed timestamp from counting as a pre-race record.
+            if captured.date().isoformat()!=str(r['race_date']):
+                excluded+=1;continue
+            deadline=datetime.strptime(str(r['race_date'])+' '+str(r['start_time']), '%Y-%m-%d %H:%M')
+            if captured.replace(tzinfo=None)>=deadline:
+                excluded+=1;continue
+            v=json.loads(r['variable_json'] or '{}')
+            d=json.loads(r['strategy_json'] or '{}')
+            typ=str(v.get('type',''))
+            bets=int(d.get('bets',0))
+            if typ=='軸流し' and bets==2: label='軸流し2点'
+            elif typ=='軸流し' and bets==3:label='軸流し3点'
+            elif 'ボックス' in typ and bets>0:label=typ
+            elif bets==0:label='見送り・候補なし'
+            else:label='その他'
+            add(groups,label,d)
+            add(by_course,(str(r['course']),label),d)
+            details.append((r,label,d))
+        except (TypeError,ValueError,KeyError,AttributeError):
+            excluded+=1
+    def cells(label,a):
+        st=a['stake'];ret=a['returned'];n=a['races']
+        roi=f'{ret/st*100:.1f}%' if st else '—'
+        hit=f'{a["hits"]/n*100:.1f}%' if n and st else '—'
+        return '<tr><td>'+html.escape(str(label))+'</td><td>'+str(n)+'</td><td>'+str(a['bets'])+'</td><td>'+str(a['hits'])+'</td><td>'+hit+'</td><td>'+f'{st:,}円'+'</td><td>'+f'{ret:,}円'+'</td><td>'+f'{ret-st:+,}円'+'</td><td>'+roi+'</td></tr>'
+    headers='<tr><th>買い方</th><th>確定R</th><th>点数</th><th>的中R</th><th>的中率</th><th>投資</th><th>払戻</th><th>収支</th><th>回収率</th></tr>'
+    order=['軸流し2点','軸流し3点','3頭ボックス','4頭ボックス','見送り・候補なし','その他']
+    group_rows=''.join(cells(k,groups[k]) for k in order if k in groups)
+    group_rows+=''.join(cells(k,v) for k,v in sorted(groups.items()) if k not in order)
+    course_rows=''.join(cells(c+' / '+t,a) for (c,t),a in sorted(by_course.items()))
+    recent=''.join('<tr><td>'+html.escape(str(r['race_date']))+'</td><td>'+html.escape(str(r['course']))+'</td><td>'+str(r['race'])+'R</td><td>'+html.escape(label)+'</td><td>'+str(d['bets'])+'</td><td>'+('的中' if d.get('hit') else ('ハズレ' if d.get('stake') else '見送り'))+'</td><td>'+f'{d["stake"]:,}円'+'</td><td>'+f'{d["returned"]:,}円'+'</td></tr>' for r,label,d in details[-100:])
+    body=("""<div class="card"><h2>v52.9 軸流し2点・重点検証（第3段階）</h2>
+    <p>発走前に保存したv52.3の買い目を、確定済みの公式ワイド払戻と照合した記録だけで集計します。</p>
+    <p>※2点と3点はそれぞれ実際に選ばれた別レースの成績です。同じレースで両方式を比較した結果ではありません。見送りも記録します。</p>
+    <p>※未照合レースは対象外。的中率は「少なくとも1点的中したレース数÷購入した確定レース数」、回収率は「払戻÷投資」です。</p>
+    <p>※少数レースの高回収率は偶然の可能性があり、将来の利益を保証しません。比較結果を当日の予想へ自動適用しません。</p>
+    <p><a class="btn secondary" href="/v529/validation">全レース検証へ戻る</a></p></div>"""
+    +'<div class="card"><h3>全期間・買い方別</h3><p>確定記録 '+str(len(rows))+'レース／有効 '+str(len(details))+'レース／除外 '+str(excluded)+'レース</p><div class="scroll"><table>'+headers+group_rows+'</table></div></div>'
+    +'<div class="card"><h3>競馬場別・買い方別</h3><div class="scroll"><table>'+headers+course_rows+'</table></div></div>'
+    +'<div class="card"><h3>直近100レース（確定済み）</h3><div class="scroll"><table><tr><th>日付</th><th>競馬場</th><th>R</th><th>買い方</th><th>点数</th><th>結果</th><th>投資</th><th>払戻</th></tr>'+recent+'</table></div></div>')
+    return page(body,'v52.9 軸流し2点の重点検証')
+
+
+
+# v52.9 Phase 4 — archive viewer and read-only CSV export.
+# No prediction records are generated or altered by either route.
+@app.get('/v529/archive')
+def v529_archive():
+    date = request.args.get('date', '').strip()
+    if date and not re.fullmatch(r'20\d{2}-\d{2}-\d{2}', date):
+        date = ''
+    with db() as con:
+        daily = con.execute("""SELECT race_date, COUNT(*) AS cnt,
+            MIN(captured_at) AS first_at, MAX(captured_at) AS last_at
+            FROM v529_snapshots GROUP BY race_date ORDER BY race_date DESC""").fetchall()
+        if date:
+            rows = con.execute("""SELECT * FROM v529_snapshots WHERE race_date=?
+                ORDER BY course,race""", (date,)).fetchall()
+        else:
+            rows = []
+    esc = html.escape
+    daily_html = ''.join(
+        '<tr><td>'+esc(str(r['race_date']))+'</td><td>'+str(r['cnt'])+'</td>'
+        '<td><a href="/v529/archive?date='+esc(str(r['race_date']),quote=True)+'">一覧を見る</a></td>'
+        '<td><a href="/v529/archive/export?date='+esc(str(r['race_date']),quote=True)+'">CSV保存</a></td></tr>'
+        for r in daily
+    ) or '<tr><td colspan="4">保存記録がありません。再デプロイ・再起動で消えた可能性があります。</td></tr>'
+    detail_html = ''.join(
+        '<tr><td>'+esc(str(r['course']))+'</td><td>'+str(r['race'])+'R</td>'
+        '<td>'+esc(str(r['start_time']))+'</td><td>'+esc(str(r['captured_at']))+'</td>'
+        '<td>'+esc(str(r['grade'] or ''))+'</td><td>'+esc(str(r['status']))+'</td></tr>'
+        for r in rows
+    )
+    body = ('<div class="card"><h2>v52.9 過去の予想保存履歴・CSVバックアップ</h2>'
+        '<p>保存されている日付を一覧で表示します。既存の予想を書き換えることはありません。</p>'
+        '<p><strong>注意：</strong>Render無料プランでは、デプロイ・再起動後にローカルデータが消えることがあります。'
+        'ここに出てこない日付の予想を、この画面から復元することはできません。</p>'
+        '<p><a class="btn green" href="/v529/archive/export">全日付のCSVを保存</a> '
+        '<a class="btn secondary" href="/v529/today">本日の予想保存へ</a></p>'
+        '<div style="overflow-x:auto"><table><thead><tr><th>保存日</th><th>レース数</th><th>詳細</th><th>バックアップ</th></tr></thead><tbody>'
+        +daily_html+'</tbody></table></div></div>')
+    if date:
+        body+=('<div class="card"><h3>'+esc(date)+' の保存記録（'+str(len(rows))+'レース）</h3>'
+            '<div style="overflow-x:auto"><table><thead><tr><th>競馬場</th><th>R</th><th>発走</th><th>保存日時</th><th>評価</th><th>状態</th></tr></thead><tbody>'
+            +detail_html+'</tbody></table></div></div>')
+    return page(body, 'v52.9 保存履歴・CSV出力')
+
+
+@app.get('/v529/archive/export')
+def v529_archive_export():
+    date = request.args.get('date', '').strip()
+    if date and not re.fullmatch(r'20\d{2}-\d{2}-\d{2}', date):
+        return Response('Invalid date', status=400, mimetype='text/plain')
+    columns = ['race_date','course','race','captured_at','start_time','status','grade',
+               'score','axis_no','picks_json','variable_json','screen_json']
+    sql = 'SELECT '+','.join(columns)+' FROM v529_snapshots'
+    params = ()
+    if date:
+        sql += ' WHERE race_date=?'
+        params = (date,)
+    sql += ' ORDER BY race_date,course,race'
+    with db() as con:
+        records = [dict(row) for row in con.execute(sql, params).fetchall()]
+    buf = io.StringIO(newline='')
+    writer = csv.DictWriter(buf, fieldnames=columns, lineterminator='\r\n')
+    writer.writeheader()
+    for row in records:
+        # Prevent CSV spreadsheet formula execution; the underlying record is left untouched.
+        for key,val in row.items():
+            if isinstance(val,str) and val.startswith(('=', '+', '-', '@', '\t', '\r')):
+                row[key] = "'" + val
+        writer.writerow(row)
+    filename = 'v529_predictions_'+(date if date else 'all_dates')+'.csv'
+    return Response('\ufeff'+buf.getvalue(), mimetype='text/csv; charset=utf-8',
+                    headers={'Content-Disposition':'attachment; filename="'+filename+'"',
+                             'Cache-Control':'no-store'})
