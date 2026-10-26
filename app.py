@@ -6329,12 +6329,109 @@ def v529_axis2_side_by_side():
       <p>※軸流し2点が発走前に実際に選ばれ、従来の3点も保存されているレースだけが対象です。後から都合の良い馬を選び直しません。</p>
       <p>※結果未照合のレースは含みません。的中率は1点以上的中したレースの割合。回収率は払戻÷投資。対象の限定による選択バイアスがあります。</p>
       <p>※少数例の比較に過ぎず、利益を保証しません。実際の購入処理には影響しません。</p>
-      <p><a class="btn secondary" href="/v529/validation">結果照合へ</a> <a class="btn secondary" href="/v529/axis2-report">買い方別の成績へ</a> <a class="btn secondary" href="/v529/archive">CSVバックアップへ</a></p>
+      <p><a class="btn secondary" href="/v529/validation">結果照合へ</a> <a class="btn green" href="/v529/axis2-conditions">条件別・時系列の検証へ</a> <a class="btn secondary" href="/v529/axis2-report">買い方別の成績へ</a> <a class="btn secondary" href="/v529/archive">CSVバックアップへ</a></p>
       </div>"""
       +'<div class="card"><p>確定記録 '+str(len(rows))+'レース／比較可能 '+str(len(detail))+'レース</p><p>対象外内訳：'+drops+'</p></div>'
       +''.join(sections)
       +'<div class="card"><h3>直近の比較対象（最大100レース）</h3><div class="scroll"><table><tr><th>日付</th><th>競馬場</th><th>R</th><th>2点払戻</th><th>3点払戻</th></tr>'+recent+'</table></div></div>')
     return page(body,'v52.9 軸流し2点の同一レース比較')
+
+
+# ===== v52.9 第8段階：過去の事前予想だけで条件別・時系列の同一R比較 =====
+@app.get('/v529/axis2-conditions')
+def v529_axis2_conditions():
+    """Descriptive report; no post-result choice or retraining of prediction rules."""
+    with db() as con:
+        source=con.execute("""SELECT s.race_date,s.course,s.race,s.captured_at,s.start_time,
+            s.grade,s.score,s.variable_json,s.picks_json,v.official_json
+            FROM v529_snapshots s JOIN v529_settlements v
+            ON s.race_date=v.race_date AND s.course=v.course AND s.race=v.race
+            ORDER BY s.race_date,s.course,s.race""").fetchall()
+
+    eligible=[]
+    exclusions={'発走後・日時不正':0,'軸流し2点以外':0,'買い目・払戻不足':0}
+    for r in source:
+        try:
+            stamp=datetime.fromisoformat(str(r['captured_at']))
+            cutoff=datetime.strptime(str(r['race_date'])+' '+str(r['start_time']),'%Y-%m-%d %H:%M')
+            if stamp.date().isoformat()!=r['race_date'] or stamp.replace(tzinfo=None)>=cutoff:
+                exclusions['発走後・日時不正']+=1;continue
+            v=json.loads(r['variable_json'] or '{}')
+            if not isinstance(v,dict) or v.get('type')!='軸流し':
+                exclusions['軸流し2点以外']+=1;continue
+            orig=json.loads(r['picks_json'] or '[]')
+            payouts=json.loads(r['official_json'] or '{}')
+            if not isinstance(orig,list) or not isinstance(payouts,dict) or not payouts or not isinstance(v.get('pairs'),list):
+                exclusions['買い目・払戻不足']+=1;continue
+            # Same race: compare only bets that were actually stored before the start.
+            two=v529_evaluate_pairs([{'combo':x.get('combo',''),'amount':100}
+                  for x in v['pairs'] if isinstance(x,dict)],payouts)
+            three=v529_evaluate_pairs([{'combo':x.get('combo',''),'amount':100}
+                  for x in orig if isinstance(x,dict)],payouts)
+            if two['bets']!=2 or three['bets']!=3:
+                exclusions['買い目・払戻不足']+=1;continue
+            score=int(r['score'] or 0)
+            score_band=('90点以上' if score>=90 else '80～89点' if score>=80 else '80点未満')
+            grade=(str(r['grade'] or '不明').strip() or '不明')
+            eligible.append({'date':r['race_date'],'course':r['course'],'race':r['race'],
+                             'grade':grade,'band':score_band,'two':two,'three':three})
+        except (ValueError,TypeError,KeyError,AttributeError,OverflowError):
+            exclusions['買い目・払戻不足']+=1
+
+    dates=sorted({r['date'] for r in eligible})
+    # Chronological, date-level split. Each date belongs to exactly one period.
+    enough=len(dates)>=5
+    cut=max(1,min(len(dates)-1,int(len(dates)*0.7))) if enough else 0
+    training=set(dates[:cut]) if enough else set()
+    def aggregates(subset):
+        grouped={}
+        for method,key in [('軸流し2点','two'),('従来3点','three')]:
+            data=[r[key] for r in subset]
+            n=len(data);hits=sum(bool(a['hit']) for a in data)
+            stake=sum(a['stake'] for a in data);payout=sum(a['returned'] for a in data)
+            grouped[method]=(n,hits,stake,payout)
+        return grouped
+    def result_table(items):
+        if not items:return '<p>対象の確定レースはありません。</p>'
+        out='<div class="scroll"><table><tr><th>方式</th><th>対象R</th><th>的中R</th><th>的中率</th><th>投資</th><th>払戻</th><th>収支</th><th>回収率</th></tr>'
+        for method,(n,hits,stake,payout) in aggregates(items).items():
+            roi=f'{payout*100/stake:.1f}%' if stake else '—'
+            out+=('<tr><td>'+html.escape(method)+'</td><td>'+str(n)+'</td><td>'+str(hits)+'</td><td>'+
+                  (f'{hits*100/n:.1f}%' if n else '—')+'</td><td>'+f'{stake:,}円</td><td>'+f'{payout:,}円</td><td>'+
+                  f'{payout-stake:+,}円</td><td>'+roi+'</td></tr>')
+        return out+'</table></div>'
+    blocks=[]
+    def block(title,items):
+        n=len(items)
+        caution=('※標本が少ないため優劣判定しません。' if n<30 else
+                 '※傾向の観察用です。新しい期間でも再検証してください。')
+        blocks.append('<div class="card"><h3>'+html.escape(title)+'</h3><p>比較可能 '+str(n)+'レース '+
+                      caution+'</p>'+result_table(items)+'</div>')
+    block('全期間（同じレースの2点と3点）',eligible)
+    if enough:
+        early=[r for r in eligible if r['date'] in training]
+        late=[r for r in eligible if r['date'] not in training]
+        block('古い期間70%（研究用・'+str(len(training))+'日）',early)
+        block('新しい期間30%（独立確認用・'+str(len(dates)-len(training))+'日）',late)
+    for course in sorted({r['course'] for r in eligible}):
+        block('競馬場：'+course,[r for r in eligible if r['course']==course])
+    for grade in sorted({r['grade'] for r in eligible}):
+        block('評価：'+grade,[r for r in eligible if r['grade']==grade])
+    for band in ('90点以上','80～89点','80点未満'):
+        items=[r for r in eligible if r['band']==band]
+        if items:block('保存時の参考スコア：'+band,items)
+    excluded='／'.join(html.escape(k)+' '+str(n)+'件' for k,n in exclusions.items())
+    recent=''.join('<tr><td>'+html.escape(str(r['date']))+'</td><td>'+html.escape(str(r['course']))+'</td><td>'+str(r['race'])+'R</td><td>'+html.escape(r['grade'])+'</td><td>'+html.escape(r['band'])+'</td></tr>' for r in eligible[-30:])
+    body=("""<div class="card"><h2>v52.9 第8段階：軸流し2点の条件別・時系列検証</h2>
+    <p>発走前に保存した軸流し2点と従来ワイド3点を、同じレースの確定払戻で比較します。各組合せ100円の仮想計算で、自動投票はしません。</p>
+    <p>競馬場・保存時の評価・参考スコア帯ごとに成績を表示します。指数差・出走頭数・距離は現在の共通保存項目にないため、推測して分類しません。</p>
+    <p>※この画面は条件を観察する研究用です。好成績だった区分を、同じ期間の結果だけで有望と断定しません。発走後の保存は対象外です。</p>
+    <p><a class="btn secondary" href="/v529/axis2-side-by-side">同一レース比較へ</a> <a class="btn secondary" href="/v529/validation">公式結果照合へ</a> <a class="btn secondary" href="/v529/archive">CSVバックアップへ</a></p></div>"""
+      +'<div class="card"><h3>検証データ</h3><p>確定保存 '+str(len(source))+'レース ／ 有効な同一レース比較 '+str(len(eligible))+'レース ／ 異なる検証日 '+str(len(dates))+'日</p><p>対象外：'+excluded+'</p>'
+      +('<p>日付単位で古い70%と新しい30%を分離しました。後半の成績を見て買い目を変更しません。</p>' if enough else '<p>時系列の独立検証には異なる開催日が5日以上必要です。現在は分割評価できません。</p>')+'</div>'
+      +''.join(blocks)
+      +'<div class="card"><h3>直近の比較対象（最大30レース）</h3><div class="scroll"><table><tr><th>日付</th><th>競馬場</th><th>R</th><th>評価</th><th>参考スコア</th></tr>'+recent+'</table></div></div>')
+    return page(body,'v52.9 軸流し2点・条件別検証')
 
 # v52.9 Phase 4 — archive viewer and read-only CSV export.
 # No prediction records are generated or altered by either route.
