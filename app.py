@@ -6468,7 +6468,7 @@ def v529_archive():
         'ここに出てこない日付の予想を、この画面から復元することはできません。</p>'
         '<p><a class="btn green" href="/v529/archive/export">全日付のCSVを保存</a> '
         '<a class="btn secondary" href="/v529/today">本日の予想保存へ</a> '
-        '<a class="btn secondary" href="/v529/archive/import">CSVから復元</a></p>' '<div style="overflow-x:auto"><table><thead><tr><th>保存日</th><th>レース数</th><th>詳細</th><th>バックアップ</th></tr></thead><tbody>'
+        '<a class="btn secondary" href="/v529/archive/import">予想CSVから復元</a> ' '<a class="btn green" href="/v529/results-backup">公式結果CSV保存・復元</a></p>' '<div style="overflow-x:auto"><table><thead><tr><th>保存日</th><th>レース数</th><th>詳細</th><th>バックアップ</th></tr></thead><tbody>'
         +daily_html+'</tbody></table></div></div>')
     if date:
         body+=('<div class="card"><h3>'+esc(date)+' の保存記録（'+str(len(rows))+'レース）</h3>'
@@ -6604,3 +6604,138 @@ def v529_archive_import():
           '<button type="submit" class="green">CSVから復元する</button></form>'
           '<p><a class="btn secondary" href="/v529/archive">保存履歴へ戻る</a></p></div>')
     return page(body,'予想CSV復元')
+
+
+
+# v52.9 Phase 9: durable manual backup of immutable official settlements.
+# Restore snapshots FIRST, then official payouts. Outcomes are always recalculated
+# from the original frozen predictions and official payouts; no prediction edits.
+V529_RESULT_COLS=('race_date','course','race','settled_at','official_json')
+
+@app.get('/v529/results-backup')
+def v529_results_backup():
+    with db() as con:
+        count=con.execute('SELECT COUNT(*) FROM v529_settlements').fetchone()[0]
+        days=con.execute('SELECT race_date,COUNT(*) n FROM v529_settlements GROUP BY race_date ORDER BY race_date DESC').fetchall()
+    lines=''.join('<tr><td>'+html.escape(str(r['race_date']))+'</td><td>'+str(r['n'])+'</td><td><a href="/v529/results-backup/export?date='+html.escape(str(r['race_date']),quote=True)+'">この日のCSVを保存</a></td></tr>' for r in days)
+    body=('<div class="card"><h2>v52.9 公式結果・ワイド払戻 CSVバックアップ</h2>'
+          '<p>確定済みの公式払戻を手動でCSV保存し、再デプロイ後に復元できます。予想の変更や自動購入はしません。</p>'
+          '<p><strong>現在の公式結果：'+str(count)+'レース</strong></p>'
+          '<p><a class="btn green" href="/v529/results-backup/export">全日付の公式結果CSVを保存</a> '
+          '<a class="btn secondary" href="/v529/results-backup/import">公式結果CSVから復元</a> '
+          '<a class="btn secondary" href="/v529/archive">予想CSV保存・復元へ</a></p>'
+          '<p><strong>復旧する順番：</strong>①予想CSVを復元 → ②公式結果CSVを復元。公式結果CSVだけでは予想を復元できません。</p>'
+          '<p>Render無料プランではデプロイ前後に両方のCSVをパソコンへ保存してください。CSVに含まれる払戻は確定済みのものだけです。</p>'
+          '<div class="scroll"><table><tr><th>日付</th><th>確定R</th><th>保存</th></tr>'+lines+'</table></div></div>')
+    return page(body,'v52.9 公式結果CSVバックアップ')
+
+@app.get('/v529/results-backup/export')
+def v529_results_backup_export():
+    date=request.args.get('date','').strip()
+    if date and not re.fullmatch(r'20\d{2}-\d{2}-\d{2}',date):
+        return Response('Invalid date',status=400,mimetype='text/plain')
+    sql='SELECT '+','.join(V529_RESULT_COLS)+' FROM v529_settlements'
+    params=()
+    if date:
+        sql+=' WHERE race_date=?';params=(date,)
+    sql+=' ORDER BY race_date,course,race'
+    with db() as con:rows=con.execute(sql,params).fetchall()
+    buf=io.StringIO(newline='')
+    writer=csv.writer(buf,lineterminator='\r\n')
+    writer.writerow(V529_RESULT_COLS)
+    for r in rows:
+        values=[]
+        for k in V529_RESULT_COLS:
+            v=str(r[k])
+            if v.startswith(('=','+','-','@','\t','\r')):v="'"+v
+            values.append(v)
+        writer.writerow(values)
+    name='v529_official_results_'+(date if date else 'all_dates')+'.csv'
+    return Response('\ufeff'+buf.getvalue(),mimetype='text/csv; charset=utf-8',
+        headers={'Content-Disposition':'attachment; filename="'+name+'"','Cache-Control':'no-store'})
+
+@app.route('/v529/results-backup/import',methods=['GET','POST'])
+def v529_results_backup_import():
+    import secrets
+    from datetime import date as _date_cls
+    token=session.get('v529_results_import_token')
+    if not token:
+        token=secrets.token_urlsafe(24);session['v529_results_import_token']=token
+    notice=''
+    if request.method=='POST':
+        try:
+            if not LOGIN_ENABLED or session.get('member_authenticated') is not True:
+                raise ValueError('復元には会員ログインが必要です。')
+            if not secrets.compare_digest(str(request.form.get('csrf','')),token):
+                raise ValueError('画面の有効期限が切れました。ページを開き直してください。')
+            f=request.files.get('backup')
+            if not f or not f.filename.lower().endswith('.csv'):
+                raise ValueError('この画面から書き出した公式結果CSVを選択してください。')
+            raw=f.stream.read(8*1024*1024+1)
+            if len(raw)>8*1024*1024:raise ValueError('CSVが8MBを超えています。日付ごとに分けて保存してください。')
+            reader=csv.DictReader(io.StringIO(raw.decode('utf-8-sig'),newline=''))
+            if tuple(reader.fieldnames or ())!=V529_RESULT_COLS:
+                raise ValueError('CSV列が一致しません。このアプリの公式結果CSVのみ対応します。')
+            records=list(reader)
+            if not records:raise ValueError('CSVに公式結果がありません。')
+            if len(records)>6000:raise ValueError('1回に読み込めるのは6000レースまでです。')
+            parsed=[];seen=set()
+            for i,r in enumerate(records,2):
+                if None in r or any(v is None for v in r.values()):
+                    raise ValueError(f'{i}行目の項目数が不正です。')
+                d=r['race_date'];course=r['course']
+                try:
+                    if _date_cls.fromisoformat(d).isoformat()!=d:raise ValueError()
+                    n=int(r['race']);datetime.fromisoformat(r['settled_at'])
+                    if course not in NAR_COURSE_CODES or not 1<=n<=12:raise ValueError()
+                    official=json.loads(r['official_json'])
+                    if not isinstance(official,dict) or not 1<=len(official)<=30:raise ValueError()
+                    clean={}
+                    for key,value in official.items():
+                        k=normalize_wide_combo(str(key))
+                        if not k or k in clean or str(key)!=k or type(value)!=int or value<=0 or value>10000000:raise ValueError()
+                        clean[k]=value
+                except (ValueError,TypeError,OverflowError):
+                    raise ValueError(f'{i}行目の開催日・競馬場・払戻形式が不正です。')
+                key=(d,course,n)
+                if key in seen:raise ValueError(f'{i}行目に同一レースが重複しています。')
+                seen.add(key);parsed.append((key,r['settled_at'],clean))
+            new=[];already=0;missing=[]
+            with db() as con:
+                for key,at,refunds in parsed:
+                    r=con.execute('SELECT * FROM v529_snapshots WHERE race_date=? AND course=? AND race=?',key).fetchone()
+                    if r is None:
+                        missing.append(f'{key[0]} {key[1]}{key[2]}R');continue
+                    if con.execute('SELECT 1 FROM v529_settlements WHERE race_date=? AND course=? AND race=?',key).fetchone():
+                        already+=1;continue
+                    variable=json.loads(r['variable_json'] or '{}')
+                    screen=json.loads(r['screen_json'] or '{}')
+                    a=v529_evaluate_pairs(variable.get('pairs',[]),refunds)
+                    b=v529_evaluate_pairs(screen.get('pairs',[]),refunds)
+                    new.append((*key,at,json.dumps(refunds,ensure_ascii=False),
+                                json.dumps(a,ensure_ascii=False),json.dumps(b,ensure_ascii=False)))
+                if missing:
+                    raise ValueError('対応する保存予想がありません。先に予想CSVを復元してください。対象例：'+', '.join(missing[:3]))
+                before=con.total_changes
+                con.executemany("""INSERT OR IGNORE INTO v529_settlements
+                    (race_date,course,race,settled_at,official_json,strategy_json,screen_json)
+                    VALUES(?,?,?,?,?,?,?)""",new)
+                inserted=con.total_changes-before
+            notice=f'復元完了：新規 {inserted} レース／既存のため変更なし {len(parsed)-inserted} レース。予想は変更せず、損益は公式払戻から再計算しました。'
+        except UnicodeDecodeError:
+            notice='UTF-8の公式結果CSVを選んでください。'
+        except ValueError as e:
+            notice=str(e)
+        except Exception:
+            app.logger.exception('v52.9 result CSV restore failed')
+            notice='復元処理でエラーが発生しました。サーバーログを確認してください。'
+    body=('<div class="card"><h2>公式結果・払戻CSVから復元</h2>'
+          '<p><strong>必ず予想CSVを先に復元してください。</strong> 公式結果CSVには予想内容は含まれません。'
+          '既存の予想・公式結果は上書きしません。未登録の結果だけを追加し成績を再計算します。</p>'
+          + ('<p><strong>'+html.escape(notice)+'</strong></p>' if notice else '')
+          +'<form method="POST" enctype="multipart/form-data">'
+          +'<input type="hidden" name="csrf" value="'+html.escape(token,quote=True)+'">'
+          +'<input type="file" name="backup" accept=".csv,text/csv" required>'
+          +'<button class="green" type="submit">公式結果CSVから復元する</button></form>'
+          +'<p><a class="btn secondary" href="/v529/results-backup">結果CSV保存・復元へ戻る</a></p></div>')
+    return page(body,'公式結果CSV復元')
