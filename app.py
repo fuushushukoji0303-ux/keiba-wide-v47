@@ -539,68 +539,83 @@ def normalize_wide_combo(combo):
 
 
 def nar_refund_url(course_name, race_no, race_date):
-    """指定した1レースだけを返すNAR公式スマホ版払戻ページURLを作る。"""
-    date_text = str(race_date or "").strip().replace("-", "/")
+    """2026年に確認できるNAR公式・開催日単位の払戻ページ。"""
+    day = str(race_date or '').strip().replace('-', '/')
     params = urllib.parse.urlencode({
-        "k_babaCode": NAR_COURSE_CODES[course_name],
-        "k_raceDate": date_text,
-        "k_raceNo": int(race_no),
+        'k_babaCode': NAR_COURSE_CODES[course_name],
+        'k_raceDate': day,
     })
-    return (
-        "https://sp.keiba.go.jp/KeibaWebSP/TodayRaceInfo/"
-        f"S_RefundMoneyList?{params}"
-    )
+    return 'https://www.keiba.go.jp/KeibaWeb/TodayRaceInfo/RefundMoneyList?' + params
 
 
-def parse_nar_wide_refunds(text):
-    """
-    NAR公式の1レース払戻ページからワイド3組と
-    100円あたり払戻金を抽出する。
-    """
+class _RefundTextParser(HTMLParser):
+    """HTMLの表・見出しで改行を確保し、前後のレースを混ぜない。"""
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.parts = []
+        self.skip = 0
+
+    def handle_starttag(self, tag, attrs):
+        if tag in ('script', 'style'):
+            self.skip += 1
+        if tag in ('tr', 'p', 'div', 'li', 'h1', 'h2', 'h3', 'h4', 'section', 'br'):
+            self.parts.append('\n')
+        elif tag in ('td', 'th'):
+            self.parts.append(' | ')
+
+    def handle_endtag(self, tag):
+        if tag in ('script', 'style'):
+            self.skip = max(0, self.skip - 1)
+        if tag in ('tr', 'p', 'div', 'li', 'h1', 'h2', 'h3', 'h4', 'section'):
+            self.parts.append('\n')
+        elif tag in ('td', 'th'):
+            self.parts.append(' | ')
+
+    def handle_data(self, data):
+        if not self.skip:
+            self.parts.append(data)
+
+
+def parse_nar_wide_refunds(text, race_no=None):
+    """1レースのワイド3組を抽出。開催日全レース表にも対応。"""
     if not text:
         return {}
+    parser = _RefundTextParser()
+    parser.feed(text)
+    lines = [re.sub(r'\s+', ' ', x).strip(' |') for x in ''.join(parser.parts).splitlines()]
+    lines = [x for x in lines if x]
+    plain = '\n'.join(lines)
+    if race_no is not None:
+        # 払戻ページ内には「1R」「2R」などの見出しが存在する。
+        # ナビゲーションに同文字列があっても本体を優先するため、
+        # 見出し以降の「ワイド」+「三連複」がある区間のみを候補にする。
+        marks = list(re.finditer(r'(?m)^\s*(1[0-2]|[1-9])\s*R\b', plain, re.I))
+        candidates = []
+        for i, m in enumerate(marks):
+            if int(m.group(1)) != int(race_no):
+                continue
+            end = marks[i + 1].start() if i + 1 < len(marks) else len(plain)
+            part = plain[m.end():end]
+            if 'ワイド' in part and ('三連複' in part or '三連単' in part):
+                candidates.append(part)
+        if not candidates:
+            return {}
+        plain = candidates[-1]
 
-    import html as _html
-    plain = _html.unescape(text)
-    plain = re.sub(r"<script\b[^>]*>.*?</script>", " ", plain, flags=re.I | re.S)
-    plain = re.sub(r"<style\b[^>]*>.*?</style>", " ", plain, flags=re.I | re.S)
-    plain = re.sub(r"<br\s*/?>", "\n", plain, flags=re.I)
-    plain = re.sub(r"</(?:td|th|tr|div|p|li)>", "\n", plain, flags=re.I)
-    plain = re.sub(r"<[^>]+>", " ", plain)
-    plain = plain.replace("\u3000", " ")
-    plain = re.sub(r"[ \t\r\f\v]+", " ", plain)
-
-    # ワイドから三連複までを対象にする。
-    m = re.search(
-        r"ワイド\s*(.*?)(?=三連複|三連単|$)",
-        plain,
-        flags=re.S,
-    )
+    m = re.search(r'ワイド\s*(.*?)(?=三連複|三連単|$)', plain, flags=re.S)
     if not m:
         return {}
-
     segment = m.group(1)
-
-    combos = []
-    for a, b in re.findall(
-        r"(?<!\d)(\d{1,2})\s*[-－ー―]\s*(\d{1,2})(?!\d)",
-        segment,
-    ):
-        combo = normalize_wide_combo(f"{a}-{b}")
-        if combo and combo not in combos:
-            combos.append(combo)
-
-    payouts = [
-        int(x.replace(",", ""))
-        for x in re.findall(r"([\d,]+)\s*円", segment)
-    ]
-
-    # 通常のワイドは3組。順番どおり対応させる。
+    # ワイドの各組合せに、直後の払戻額を対応させる。
+    # 公式表の「人気」欄を金額として誤認しない。
     result = {}
-    for combo, payout in zip(combos[:3], payouts[:3]):
-        if payout > 0:
-            result[combo] = payout
-    return result
+    pat = r'(?<!\d)(\d{1,2})\s*[-－ー―]\s*(\d{1,2})(?!\d)\s*(?:\|\s*)*([\d,]+)\s*円'
+    for a, b, value in re.findall(pat, segment):
+        combo = normalize_wide_combo(f'{a}-{b}')
+        amount = int(value.replace(',', ''))
+        if combo and amount >= 100 and combo not in result:
+            result[combo] = amount
+    return result if len(result) == 3 else {}
 
 
 
@@ -627,17 +642,24 @@ def settle_baseline_row(row, refunds):
 
 
 def nar_get_wide_refunds(course_name, race_no, race_date):
-    """NAR公式から確定ワイド払戻を取得。未確定なら空dict。"""
+    """公式の開催日ページから指定レースだけを抽出する。"""
+    result, _ = nar_get_wide_refunds_checked(course_name, race_no, race_date)
+    return result
+
+
+def nar_get_wide_refunds_checked(course_name, race_no, race_date):
     if course_name not in NAR_COURSE_CODES:
-        return {}
+        return {}, '未知の競馬場'
     try:
-        text = nar_fetch(
-            nar_refund_url(course_name, race_no, race_date),
-            timeout=15,
-        )
-    except Exception:
-        return {}
-    return parse_nar_wide_refunds(text)
+        data = nar_fetch(nar_refund_url(course_name, race_no, race_date), timeout=18)
+    except Exception as exc:
+        app.logger.warning('NAR refund fetch failed %s %sR: %s', course_name, race_no, exc)
+        return {}, '公式サイトへの接続に失敗'
+    result = parse_nar_wide_refunds(data, race_no)
+    if not result:
+        return {}, '公式ページ内に対象レースの確定ワイド3組を確認できず'
+    return result, '照合可能'
+
 
 
 def settle_validation_row(row, refunds):
@@ -6075,8 +6097,9 @@ def v529_evaluate_pairs(pairs, refunds):
     return {'bets':len(clean),'stake':stake,'returned':returned,'profit':returned-stake,
             'hits':hits,'hit':bool(hits),'pairs':[{'combo':c,'amount':a} for c,a in clean]}
 
-def v529_settle_one(r):
-    refunds=nar_get_wide_refunds(r['course'],int(r['race']),r['race_date'])
+def v529_settle_one(r, refunds=None):
+    if refunds is None:
+        refunds=nar_get_wide_refunds(r['course'],int(r['race']),r['race_date'])
     if not refunds:return False
     try:
         variable=json.loads(r['variable_json'] or '{}')
@@ -6116,13 +6139,19 @@ def v529_validation():
                 LEFT JOIN v529_settlements v ON v.race_date=s.race_date AND v.course=s.course AND v.race=s.race
                 WHERE s.race_date=? AND v.race_date IS NULL ORDER BY s.course,s.race LIMIT 36""",(date,)).fetchall()
         completed=0
+        reasons={}
         for r in pending:
             if date==today():
                 try:
                     if now().strftime('%H:%M') <= r['start_time']:continue
                 except Exception:continue
-            if v529_settle_one(r):completed+=1
-        notice=f'公式払戻を照合：{completed}レース確定／今回確認した{len(pending)}レース。未確定・取得不可は保留します。'
+            refunds, reason = nar_get_wide_refunds_checked(r['course'],int(r['race']),r['race_date'])
+            if refunds and v529_settle_one(r, refunds):
+                completed+=1
+            else:
+                reasons[reason]=reasons.get(reason,0)+1
+        reason_text='／'.join(f'{k}：{v}件' for k,v in reasons.items())
+        notice=f'公式払戻を照合：{completed}レース確定／今回確認した{len(pending)}レース。{reason_text} 未確定・取得不可は保留します。' 
     with db() as con:
         snapshots=con.execute('SELECT * FROM v529_snapshots WHERE race_date=? ORDER BY course,race',(date,)).fetchall()
         rows=con.execute("""SELECT s.course,s.race,s.start_time,s.grade,v.strategy_json,v.screen_json,v.official_json
