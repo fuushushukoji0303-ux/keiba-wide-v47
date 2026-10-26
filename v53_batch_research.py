@@ -26,7 +26,7 @@ def stat(rows):
     return {'races':n,'hits':sum(r['payout']>0 for r in rows),'stake':stake,'payout':payout,
             'profit':payout-stake,'roi':round(100*payout/stake,1) if stake else None}
 
-def research(horse_blob,race_blob,pay_blob,limit=100):
+def research(horse_blob,race_blob,pay_blob,limit=100,include_rows=False):
     if limit not in (100,300): raise ValueError('検証数は100か300を選んでください')
     horses=load(horse_blob,['競馬場','競走年月日','レース番号','馬番','馬名','着順'])
     races=load(race_blob,['競馬場','競走年月日','レース番号','頭数','距離'])
@@ -93,4 +93,5 @@ def research(horse_blob,race_blob,pay_blob,limit=100):
     courses={c:{s:stat([r['plans'][s] for r in selected if r['course']==c and s in r['plans']]) for s in STRATEGIES[:4]} for c in sorted({r['course'] for r in selected})}
     return {'limit':limit,'available':len(eligible),'selected':len(selected),'dates':len(days),
             'train_days':len(training),'test_days':len(testing),'groups':groups,'courses':courses,
-            'candidate':chosen,'skipped':dict(skip),'source_rows':len(horses)}
+            'candidate':chosen,'skipped':dict(skip),'source_rows':len(horses),
+            'eligible_rows':selected if include_rows else []}
