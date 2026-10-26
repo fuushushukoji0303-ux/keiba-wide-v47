@@ -27,7 +27,7 @@ def stat(rows):
             'profit':payout-stake,'roi':round(100*payout/stake,1) if stake else None}
 
 def research(horse_blob,race_blob,pay_blob,limit=100,include_rows=False):
-    if limit not in (100,300): raise ValueError('検証数は100か300を選んでください')
+    if limit not in (100,300,1000,3000): raise ValueError('検証数は100・300・1000・3000から選択してください')
     horses=load(horse_blob,['競馬場','競走年月日','レース番号','馬番','馬名','着順'])
     races=load(race_blob,['競馬場','競走年月日','レース番号','頭数','距離'])
     pays=load(pay_blob,['競馬場','競走年月日','レース番号','ワイド組番1馬番1','ワイド組番1馬番2','ワイド払戻金1（円）'])

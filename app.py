@@ -38,6 +38,7 @@ import io
 from historical_replay import replay as replay_official_csv
 from v53_batch_research import research as v53_research
 from v531_course_selection import study as v531_study
+from v532_course_selection import study as v532_study
 from strategy_compare import compare as compare_official_csv, STRATEGIES as RESEARCH_STRATEGIES
 from v528_research import study as v528_study, STRATEGIES as V528_STRATEGIES
 from history_lab import (RESULT_FIELDS, PRED_FIELDS, parse_results, parse_predictions,
@@ -5740,6 +5741,56 @@ def history_lab_table(rows, label, dimension='strategy'):
             '<th>払戻</th><th>収支</th><th>回収率</th></tr>'+''.join(lines or ['<tr><td colspan="8">対象データなし</td></tr>'])+'</table></div>')
 
 
+
+# ===== v53.2 large-sample per-course independent validation =====
+@app.route('/history-lab/v532',methods=['GET','POST'])
+def history_lab_v532():
+    output=''
+    if request.method=='POST':
+        try:
+            count=int(request.form.get('count','1000'))
+            if count not in (300,1000,3000): raise ValueError('検証件数を選択してください')
+            blobs=[]
+            for field in ('horselist','racelist','payback'):
+                item=request.files.get(field)
+                if not item or not item.filename.lower().endswith('.csv'):
+                    raise ValueError('3種類のCSVファイルを指定してください')
+                blobs.append(item.stream.read(25_000_001))
+            report=v532_study(*blobs,limit=count); base=report['base']
+            output='<div class="card"><div class="title">v53.2 独立検証結果</div><p>検証可能 '+str(base['available'])+'R／今回 '+str(base['selected'])+'R／対象 '+str(len(report['courses']))+'競馬場</p>'
+            if base['selected']<count:
+                output+='<div class="note">指定の'+str(count)+'Rに届いていません。CSVに含まれる過去履歴または検証可能なレース数を増やしてください。</div>'
+            output+='<p class="small">研究候補は前半の回収率だけで決定し、後半では一切選び直しません。回収率100%以上は利益保証ではありません。</p></div>'
+            output+='<div class="card"><div class="scroll"><table><tr><th>競馬場</th><th>総R</th><th>検証日</th><th>前半R</th><th>後半R</th><th>件数目安</th><th>前半選択</th><th>前半回収率</th><th>後半回収率</th><th>判定</th></tr>'
+            for c in report['courses']:
+                pick=c['chosen']; a=c['strategies'][pick]['train'] if pick else None; b=c['strategies'][pick]['test'] if pick else None
+                pct=lambda r:'―' if not r or r['roi'] is None else str(r['roi'])+'%'
+                total=max(0,report['min_train']+report['min_test']-c['races'])
+                fields=[c['course'],str(c['races']),str(c['dates']),str(c['train_races']),str(c['test_races']),
+                        '十分な候補数' if c['train_races']>=report['min_train'] and c['test_races']>=report['min_test'] else 'あと約'+str(total)+'R（目安）',
+                        pick or '選択なし',pct(a),pct(b),c['status']]
+                output+='<tr>'+''.join('<td>'+html.escape(x)+'</td>' for x in fields)+'</tr>'
+            output+='</table></div></div>'
+            for c in report['courses']:
+                output+='<div class="card"><div class="title">'+html.escape(c['course'])+'：全方式（前半／後半）</div><div class="scroll"><table><tr><th>方式</th><th>前半R</th><th>前半的中</th><th>前半回収率</th><th>後半R</th><th>後半的中</th><th>後半回収率</th></tr>'
+                for name,stats in c['strategies'].items():
+                    a=stats['train'];b=stats['test'];pct=lambda x:'―' if x['roi'] is None else str(x['roi'])+'%'
+                    cells=[name,str(a['races']),str(a['hits']),pct(a),str(b['races']),str(b['hits']),pct(b)]
+                    output+='<tr>'+''.join('<td>'+html.escape(v)+'</td>' for v in cells)+'</tr>'
+                output+='</table></div></div>'
+        except (ValueError,UnicodeError,OverflowError) as exc:
+            output='<div class="bad">読み込みエラー：'+html.escape(str(exc))+'</div>'
+    return page('''<div class="card"><div class="title">v53.2 過去300・1,000・3,000レースの競馬場別検証</div>
+    <div class="note">公式CSVを使い、古い着順からの<strong>簡易スコア</strong>で4方式を仮想比較します。本番の3部門能力指数や当時のオッズは再現していません。各競馬場で日付単位の古い70%から選定し、新しい30%では固定検証します。選定には前半50R以上かつ回収率100%以上、検証には後半20R以上かつ回収率100%以上・異なる開催日8日以上を必要とします。<strong>まだ本日の予想へ自動反映しません。</strong></div>
+    <form method="post" enctype="multipart/form-data">
+      <p>① horselist CSV：<input type="file" name="horselist" accept=".csv" required></p>
+      <p>② racelist CSV：<input type="file" name="racelist" accept=".csv" required></p>
+      <p>③ payback CSV：<input type="file" name="payback" accept=".csv" required></p>
+      <p>検証件数：<select name="count"><option value="300">300R（動作確認）</option><option value="1000" selected>1,000R</option><option value="3000">3,000R</option></select></p>
+      <button type="submit">競馬場ごとの買い方を独立検証する（購入しません）</button>
+    </form><p class="small">CSVは各25MB以下です。レース数を増やすには対象期間を含むCSVが必要です。入力CSVは保存しません。</p>
+    <p><a class="btn secondary" href="/history-lab/v531">v53.1に戻る</a></p></div>''' + output,'v53.2 競馬場別大規模検証')
+
 # ===== v53.1 競馬場別の前半選択・後半固定検証（研究のみ） =====
 @app.route('/history-lab/v531', methods=['GET','POST'])
 def history_lab_v531():
@@ -5981,7 +6032,7 @@ def history_lab_page():
       <div class="small">{stats}</div>
       <div class="small">対象外：結果未登録 {skipped['no_result']}件、発走後の予想・時刻不正 {skipped['not_pre_race']}件、
       不正なデータ {skipped['invalid']}件、買い目なし {skipped['no_bets']}件</div></div>
-      <div class="card"><div class="title">v53.1 競馬場別独立検証</div><a class="btn green" href="/history-lab/v531">競馬場ごとに前半で選び後半で検証</a></div><div class="card"><div class="title">v53.0 過去一括比較</div><a class="btn green" href="/history-lab/v530">100・300レースでワイド買い方を比較</a></div><div class="card"><div class="title">v52.8 新機能</div><a class="btn green" href="/history-lab/v528">競馬場別・前半選択と後半独立検証</a><p><strong>v52.7 研究</strong></p><a class="btn secondary" href="/history-lab/strategy-compare">買い方別・競馬場別の回収率を比較する</a><p><a class="btn secondary" href="/history-lab/official-replay">v52.6の従来研究</a></p></div><div class="card"><div class="title">① 過去の確定ワイド払戻を取り込む</div>
+      <div class="card"><div class="title">v53.2 大規模競馬場別検証</div><a class="btn green" href="/history-lab/v532">300・1,000・3,000Rの独立検証</a></div><div class="card"><div class="title">v53.1 競馬場別独立検証</div><a class="btn green" href="/history-lab/v531">競馬場ごとに前半で選び後半で検証</a></div><div class="card"><div class="title">v53.0 過去一括比較</div><a class="btn green" href="/history-lab/v530">100・300レースでワイド買い方を比較</a></div><div class="card"><div class="title">v52.8 新機能</div><a class="btn green" href="/history-lab/v528">競馬場別・前半選択と後半独立検証</a><p><strong>v52.7 研究</strong></p><a class="btn secondary" href="/history-lab/strategy-compare">買い方別・競馬場別の回収率を比較する</a><p><a class="btn secondary" href="/history-lab/official-replay">v52.6の従来研究</a></p></div><div class="card"><div class="title">① 過去の確定ワイド払戻を取り込む</div>
       <div class="small">日付・競馬場・レース番号・発走時刻・ワイドの組合せ・100円あたり払戻金を入力したCSVを使います。
       取り込むデータの利用権限と正確性を確認してください。既存結果は同じレース番号なら更新されます。</div>
       <div class="actions"><a class="btn secondary" href="/history-lab/template/results">結果CSVのひな形</a></div>
